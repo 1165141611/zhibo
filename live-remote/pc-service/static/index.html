@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>直播遥控(测试）</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html,body { margin:0; }
+  body {
+    padding: 6px; font-family: system-ui, sans-serif;
+    background: #14161a; color: #eee; user-select: none; overflow: hidden;
+  }
+  .bar { display:flex; flex-direction:column; gap:5px; }
+  .row { display:flex; gap:5px; align-items:center; }
+  .scenes { display:flex; gap:5px; flex:1; }
+  button {
+    border:none; border-radius:7px; padding:8px 0; font-size:13px; font-weight:600;
+    color:#eee; background:#262a31; flex:1; transition:transform .05s;
+  }
+  button:active { transform:scale(0.96); }
+  button.active { background:#2f6df0; }
+  button.warn.active { background:#e0564b; }
+  .sec { background:#3a3f49; font-size:12px; }
+  .hold { position:relative; overflow:hidden; }
+  .holdfill { position:absolute; left:0; top:0; bottom:0; width:0; background:#e0564b; }
+  .holdlbl { position:relative; z-index:1; }
+  .bgm { background:#2a2f37; font-size:16px; flex:none; width:46px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:#e0564b; flex:none; }
+  .dot.on { background:#3ecf6b; }
+  .vlabel { font-size:14px; flex:none; }
+  .vol input[type=range] { flex:1; height:22px; }
+  .volval { font-size:11px; color:#2f6df0; font-weight:700; min-width:24px; text-align:right; flex:none; }
+  .track-row { justify-content:space-between; font-size:11px; }
+  .track { color:#cdd3dc; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; }
+  .ptime { color:#7a828e; flex:none; }
+  .pbar { height:4px; border-radius:2px; background:#262a31; overflow:hidden; }
+  .pfill { height:100%; width:0%; background:#2f6df0; transition:width .4s linear; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <div class="row">
+      <span class="dot" id="dot" title="后端连接状态"></span>
+      <span class="dot" id="scrcpyDot" title="投屏状态(点一下重试)"
+            onclick="ensureScrcpy()"></span>
+      <div class="scenes" id="scenes"></div>
+    </div>
+
+    <div class="row">
+      <button class="sec" id="studioBtn" onclick="send({cmd:'studio_toggle'})">显示/隐藏 Studio</button>
+      <button class="sec hold" id="resetBtn" title="长按 5 秒归位(先把 4 条通道的 M 全部关掉)">
+        <span class="holdfill" id="resetFill"></span><span class="holdlbl" id="resetLbl">⟳ 归位</span>
+      </button>
+      <button class="bgm" onclick="send({cmd:'bgm',action:'prev'})">⏮</button>
+      <button class="bgm" onclick="send({cmd:'bgm',action:'playpause'})">⏯</button>
+      <button class="bgm" onclick="send({cmd:'bgm',action:'next'})">⏭</button>
+    </div>
+
+    <div class="row vol">
+      <span class="vlabel">🔊</span>
+      <input type="range" id="vol" min="0" max="100" value="50"
+             oninput="volLabel(this.value)" onchange="send({cmd:'bgm_vol',value:+this.value})">
+      <span class="volval" id="volval">--</span>
+    </div>
+
+    <div class="row track-row">
+      <span class="track" id="track">—</span>
+      <span class="ptime"><span id="ptime">0:00</span> / <span id="pdur">0:00</span></span>
+    </div>
+    <div class="pbar"><div class="pfill" id="pfill"></div></div>
+  </div>
+
+<script>
+const SCENES = [
+  {id:1,label:"聊天"}, {id:2,label:"湿唱"}, {id:3,label:"干唱"},
+  {id:4,label:"喇叭"}, {id:5,label:"闭麦",warn:true},
+];
+const scenesEl = document.getElementById("scenes");
+SCENES.forEach(s => {
+  const b = document.createElement("button");
+  b.textContent = s.label; b.dataset.id = s.id;
+  if (s.warn) b.classList.add("warn");
+  b.onclick = () => send({cmd:"scene", id:s.id});
+  scenesEl.appendChild(b);
+});
+
+let ws, curScene = null;
+function connect() {
+  ws = new WebSocket("ws://" + location.host + "/ws");
+  ws.onopen = () => { setConn(true); ensureScrcpy(); };   // 进入悬浮态即请求投屏
+  ws.onclose = () => { setConn(false); setTimeout(connect, 1500); };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === "state") applyState(m);
+  };
+}
+function send(obj){ if (ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+function setConn(ok){ document.getElementById("dot").classList.toggle("on", ok); }
+
+// 归位:悬浮窗里原生弹窗弹不出(窗口不可聚焦),改用"长按 5 秒"触发,防误触。
+const HOLD_MS = 5000;
+let holdTimer = null;
+const resetBtn  = document.getElementById("resetBtn");
+const resetFill = document.getElementById("resetFill");
+const resetLbl  = document.getElementById("resetLbl");
+function holdStart(e){
+  if (e) e.preventDefault();            // 阻止触摸后再触发一次模拟鼠标事件
+  if (holdTimer) return;
+  resetFill.style.transition = "width " + (HOLD_MS / 1000) + "s linear";
+  void resetFill.offsetWidth;          // 触发重排,让进度条从 0 开始填充
+  resetFill.style.width = "100%";
+  resetLbl.textContent = "按住…松开取消";
+  holdTimer = setTimeout(function(){
+    holdTimer = null;
+    resetFill.style.transition = "none";
+    resetFill.style.width = "0";
+    send({cmd:'reset_scene'});
+    resetLbl.textContent = "已归位";
+    setTimeout(function(){ resetLbl.textContent = "⟳ 归位"; }, 1200);
+  }, HOLD_MS);
+}
+function holdCancel(){
+  if (!holdTimer) return;
+  clearTimeout(holdTimer); holdTimer = null;
+  resetFill.style.transition = "none";
+  resetFill.style.width = "0";
+  resetLbl.textContent = "⟳ 归位";
+}
+resetBtn.addEventListener("touchstart", holdStart, {passive:false});
+resetBtn.addEventListener("touchend", holdCancel);
+resetBtn.addEventListener("touchcancel", holdCancel);
+resetBtn.addEventListener("mousedown", holdStart);
+resetBtn.addEventListener("mouseup", holdCancel);
+resetBtn.addEventListener("mouseleave", holdCancel);
+// 让 PC 检测/自动拉起 scrcpy 无线投屏(不带声音)
+function ensureScrcpy(){ send({cmd:"ensure_scrcpy"}); }
+function volLabel(v){ document.getElementById("volval").textContent = v; }
+
+// BGM 进度(只读,本地按秒插值让进度条平滑)
+let bgmPos = 0, bgmDur = 0, bgmPlaying = false, lastSync = Date.now();
+function fmt(s){ s = Math.max(0, Math.floor(s)); return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); }
+function renderProgress(){
+  let pos = bgmPos;
+  if (bgmPlaying) pos += (Date.now() - lastSync) / 1000;
+  if (bgmDur > 0) pos = Math.min(pos, bgmDur);
+  document.getElementById("pfill").style.width = bgmDur > 0 ? (pos/bgmDur*100)+"%" : "0%";
+  document.getElementById("ptime").textContent = fmt(pos);
+  document.getElementById("pdur").textContent = fmt(bgmDur);
+}
+setInterval(renderProgress, 500);
+
+function applyState(m){
+  if (m.bgm_pos !== undefined){ bgmPos = m.bgm_pos; lastSync = Date.now(); }
+  if (m.bgm_dur !== undefined) bgmDur = m.bgm_dur;
+  if (m.bgm_playing !== undefined) bgmPlaying = m.bgm_playing;
+  renderProgress();
+  if (m.scene != null){
+    curScene = m.scene;
+    document.querySelectorAll("#scenes button").forEach(b =>
+      b.classList.toggle("active", +b.dataset.id === curScene));
+  }
+  if (m.bgm_vol != null){
+    document.getElementById("vol").value = m.bgm_vol;
+    volLabel(m.bgm_vol);
+  }
+  if (m.bgm_title !== undefined){
+    const t = m.bgm_title ? (m.bgm_title + (m.bgm_artist ? " — " + m.bgm_artist : "")) : "—";
+    document.getElementById("track").textContent = t;
+  }
+  if (m.studio_visible !== undefined){
+    document.getElementById("studioBtn").textContent =
+      m.studio_visible ? "隐藏 Studio" : "显示 Studio";
+  }
+  if (m.scrcpy_ok !== undefined){
+    document.getElementById("scrcpyDot").classList.toggle("on", !!m.scrcpy_ok);
+  }
+  if (m.scrcpy_msg){
+    document.getElementById("scrcpyDot").title = "投屏:" + m.scrcpy_msg + "(点一下重试)";
+  }
+}
+connect();
+
+// 把内容真实高度回报给安卓外壳,使悬浮窗高度贴合内容、不出现内部滚动
+function reportHeight(){
+  if (window.Android && Android.reportHeight){
+    Android.reportHeight(document.body.scrollHeight + 2);
+  }
+}
+if (window.ResizeObserver){ new ResizeObserver(reportHeight).observe(document.body); }
+window.addEventListener("load", reportHeight);
+setTimeout(reportHeight, 300);
+</script>
+</body>
+</html>

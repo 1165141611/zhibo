@@ -1,0 +1,15 @@
+[MIDI] 已连接: loopMIDI Port
+==================================================
+  直播遥控 · 电脑后台服务已启动
+  手机 App / 网页填:   192.168.1.5:8765
+  Studio One MIDI:     已连接
+  已缩到右下角托盘,右键图标可退出
+==================================================
+[SCRCPY] ip=192.168.1.6 ok=True 已连接 192.168.1.6:5555,scrcpy 启动中
+Exception ignored in: <function _compointer_base.__del__ at 0x00000220259E1C60>
+Traceback (most recent call last):
+  File "C:\Users\11651\AppData\Local\Programs\Python\Python313\Lib\site-packages\comtypes\_post_coinit\unknwn.py", line 288, in __del__
+    self.Release()  # type: ignore
+  File "C:\Users\11651\AppData\Local\Programs\Python\Python313\Lib\site-packages\comtypes\_post_coinit\unknwn.py", line 420, in Release
+    return self.__com_Release()  # type: ignore
+OSError: exception: access violation writing 0x0000000000000024
