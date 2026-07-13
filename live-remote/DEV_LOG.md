@@ -330,3 +330,53 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
   pystray 的 `notify` 底层是 `Shell_NotifyIcon(NIF_INFO)`,**没有 `update_menu` 那种线程亲和限制**,可从
   library 监听线程直接调(独立脚本实测跨线程弹泡正常、退出干净);歌名空(QRC 缺 [ti:])回退显示 mid;
   `--headless` 无托盘时静默跳过。
+- **歌名不准 + 托盘计数不刷新 —— 两个 bug 一起修**(2026-07-14,承上条,作者反馈):作者新入库成都/程艾影/鼓楼,
+  成都显示成 `2422569`、鼓楼显示成 `鼓楼-赵雷-ktv`,且托盘曲库数没变、疑似"没入库"。
+  - **排查一:歌名根因不在解密,在源数据**。歌名取自 QRC `[ti:]`。dump 成都 QRC:`[ti:2422569][ar:0]`——
+    WeSing 对这首 KTV 版伴奏在歌词文件里就存了内部数字ID,**继续解密同一文件没用,源就是脏的**。鼓楼是
+    `[ti:鼓楼-赵雷-ktv]`(带歌手+ktv 后缀,可清洗)。**试过在线反查(QQ音乐搜歌词)全废**:返回翻唱/电台
+    节目,连 [ti:] 本来对的《吉姆餐厅》都排第6、《郭源潮》搜不到——放弃联网。
+  - **排查二:干净歌名在本地但 AES 加密**。作者点明应走本地解密。WeSing `User Data\KSongsDataInfo.dat`
+    (最近唱过的歌,加了三首后才更新)确有干净名,但**熵 7.904、16字节完美对齐却 133 块全不重复(非ECB,
+    是CBC/CTR)**;多策略(PCM静态XOR / 单字节异或全扫 / 3DES / 位反转)零命中;KSongs 系列 DLL **无 TEA
+    delta**,AES S-box 只在登录/OpenSSL,DLL 是 stripped C++ 搜不到 key。= 真 AES + 运行时密钥,要解只能
+    逆向/扒内存——即 karaoke-player README 标记的"弯路"。**方案放弃,转手动改名**(作者预授权"不行就手动")。
+  - **修法(歌名)**:`library._clean_title`(去 `-歌手-ktv`/版本括号,英文连字符标题不误伤)+ `_is_junk_title`
+    (纯数字/空=救不回)→ `_qrc_meta` 返回加 `needs_name`。救回鼓楼(→`鼓楼`)、成都标 needs_name。纯数字歌手
+    (`0`)也清成空。`rename(mid,title,artist)` 更新 `library.json`+`meta.json`+内存清单、标 `named=True`;
+    `pending_rename()` 列待命名。启动 `_remigrate` 用新规则重刷旧条目(幂等,**跳过 named 不覆盖手动订正**)。
+    实测:8 首重迁移——鼓楼修好、成都标 needs_name、其余不变;`rename(成都,赵雷)` 落盘正确。
+  - **修法(手动改名 UI)**:入库若 `needs_name`,通知文案改"点此改名"并记 `_last_needs_name_mid`;
+    **点气泡通知**→ 弹 tkinter 两栏(歌名/歌手)编辑框(**独立线程跑 mainloop,绝不阻塞托盘消息泵**,同
+    do_quit 教训)→ 存 `library.rename`。托盘另加"✎ 待命名(N)"项(`visible` 回调,仅有待命名时显示)兜底。
+  - **修法(托盘计数不刷新,独立真 bug)**:根因——**pystray-win32 右键弹的是缓存菜单句柄,不会在打开时重新
+    求值动态 lambda**,菜单文字只在 `update_menu()` 被调时刷新;而 `update_menu` 只能在托盘线程调(跨线程改
+    Win32 菜单会崩),非托盘线程(曲库监听/播放器reader)的 `refresh_tray()` **旧代码直接跳过**→ 计数/勾选
+    变化后永不刷新("下次打开自动刷新"的注释是错的)。修:注册自定义窗口消息 `WM_TRAY_REFRESH=WM_USER+20`,
+    `refresh_tray` 非托盘线程时 `PostMessageW` 唤醒托盘线程,经 pystray 的 `_dispatcher` 分发到 `update_menu`
+    (托盘线程执行=安全);气泡点击也经包裹的 `WM_NOTIFY(WM_USER+11)` handler 同法分发到改名框。
+    **实测**:真 pystray 图标,非消息泵线程 PostMessage → 菜单文字从"5"刷新到"9"、气泡点击回调触发、干净退出。
+- **改名交互完善 + 曲库管理窗**(2026-07-14,作者反馈继续):
+  - **通知点击串歌 bug**:原来只有 `needs_name` 的歌才记 mid、才可点,非待命名的点了没反应;且改完一首后,
+    下一首(无 needs_name)通知点击打开的仍是上一首。根因:balloon 目标是 `_last_needs_name_mid`,只在
+    needs_name 时更新。修:改为 `_last_import_mid`,**每首入库都更新**(=当前气泡对应的歌;Windows 只显示
+    最新气泡,故它就是可见气泡的歌),点气泡永远编辑"这条通知的歌",所有歌都能点改。
+  - **托盘精简**:移除"监听: 运行中"行(`watcher_running` 仍留 STATE 无害)。
+  - **曲库项可点击 → 曲库管理窗**(`_open_library_browser`):tkinter `ttk.Treeview`,按 `added` **倒序**列
+    全部歌,顶部搜索框 `StringVar.trace_add` 实时过滤(歌名/歌手),双击行或"编辑选中"→ 子 `Toplevel`
+    `grab_set` 模态改名(保存后 `refresh()` 重列),待命名歌行标红。**单 Tk 根 + 子 Toplevel 同根同线程**
+    (多 Tk 根跨线程易崩,故编辑用 Toplevel 不另开根);通知改名框仍各自独立根(独立线程),两者共用
+    `_build_edit_form(container, mid, on_saved)`。
+  - **实测**:真实曲库(13首)冒烟——Treeview 倒序正确(最新在顶)、搜"赵雷"按歌手过滤、搜"鼓楼"过滤到1首、
+    编辑 Toplevel 预填正确、构建+搜索+编辑+销毁无异常;server 重启零错误、`/library` 13 首歌名全干净。
+- **Studio One 显隐持久 + 伴奏音量感知曲线**(2026-07-14,作者反馈):
+  - **Studio One 显隐跨重启持久**:`_save_persist` 加 `studio_visible`,`studio_toggle` 命令改后 `_save_persist()`,
+    `_restore_persist` 恢复 `STATE["studio_visible"]`;**上次隐藏则重新 `studio_win.hide()`,可见则不动**
+    (避免启动抢焦点)。与声卡场景/静音/k_vol 同存 `state_cache.json`。实测:save 写入、False 恢复调一次 hide、
+    True 恢复不动窗口,往返全过。
+  - **伴奏音量感知(平方)曲线**:作者反馈"手机音量调到最小档依然较大"。根因:`audio_engine` 原来
+    **线性**映射(增益=%/100),但人耳近对数,最小档(15档制约7%)线性=-23dB 仍听得清。改 `_gain_for(pct)`
+    返回 `(pct/100)²`:最小档→0.5%≈**-46dB**(真正小声)、50%→25%、100%→原样,低端衰减更快、控制更细。
+    重构 `_vol`→`_vol_pct`(档位,`volume_pct` 报它,STATE/手机同步用档位不受影响)+ `_gain`(回调用,平方后)。
+    实测:各档位 dB 曲线对照(线性 vs 平方)正确、`volume_pct` 仍报档位、150 夹到 100;重启后 `k_vol=14`
+    (作者本就调很低)现增益 0.0196(-34dB)明显更轻。

@@ -25,7 +25,8 @@ class AudioEngine:
         self.semitones = 0
         self.playing = False
         self.xruns = 0
-        self._vol = 1.0           # 输出音量增益 0..1(手机音量键同步伴奏音量);换歌不重置
+        self._vol_pct = 100       # 音量档位 0..100(=手机媒体音量%);换歌不重置
+        self._gain = 1.0          # 实际增益 = 感知曲线(_vol_pct);回调用它,float 赋值原子免锁
 
         self._lock = threading.Lock()
         self._q = queue.Queue(maxsize=6)
@@ -150,7 +151,7 @@ class AudioEngine:
                 buf = np.concatenate([buf, chunk], axis=0) if len(buf) else chunk
             take = min(frames, len(buf))
             if take:
-                outdata[:take] = buf[:take] * self._vol
+                outdata[:take] = buf[:take] * self._gain
             if take < frames:
                 outdata[take:] = 0
             self._pending = buf[take:]
@@ -184,13 +185,22 @@ class AudioEngine:
     def is_playing(self):
         return self.playing
 
+    @staticmethod
+    def _gain_for(pct):
+        """档位%→增益:**感知(平方)曲线**。人耳近对数,线性映射时低档位仍显大(最小档~7%
+        线性=-23dB还听得清);平方让低端更快衰减、控制更细(~7%→0.5%≈-46dB,50%→25%,
+        100%→原样)。0=静音。"""
+        p = max(0, min(100, int(pct))) / 100.0
+        return p * p
+
     def set_volume(self, pct):
-        """设输出音量(0-100,线性增益)。float 赋值原子,无需锁;回调下一块即生效。"""
-        self._vol = max(0, min(100, int(pct))) / 100.0
+        """设输出音量档位(0-100)。经感知曲线得增益;float 赋值原子,无需锁;回调下一块即生效。"""
+        self._vol_pct = max(0, min(100, int(pct)))
+        self._gain = self._gain_for(self._vol_pct)
 
     @property
     def volume_pct(self):
-        return int(round(self._vol * 100))
+        return self._vol_pct     # 报回档位(0-100),非增益——STATE/手机同步用的是档位
 
     def seek_ms(self, delta_ms):
         with self._lock:

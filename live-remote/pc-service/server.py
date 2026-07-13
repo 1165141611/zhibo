@@ -122,6 +122,7 @@ def _save_persist():
                 "scene": STATE.get("scene"),
                 "mute_state": {str(k): bool(v) for k, v in _mute_state.items()},
                 "k_vol": int(STATE.get("k_vol", 100)),
+                "studio_visible": bool(STATE.get("studio_visible", True)),
             }
             tmp = PERSIST_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -152,7 +153,16 @@ def _restore_persist():
             STATE["k_vol"] = max(0, min(100, int(data["k_vol"])))
         except Exception:
             pass
-    print(f"[PERSIST] 已恢复: scene={STATE['scene']} k_vol={STATE['k_vol']} mute={_mute_state}")
+    if data.get("studio_visible") is not None:
+        sv = bool(data["studio_visible"])
+        STATE["studio_visible"] = sv
+        if not sv:               # 上次是隐藏 → 重新隐藏,保持一致(可见则不动,避免抢焦点)
+            try:
+                studio_win.hide()
+            except Exception:
+                pass
+    print(f"[PERSIST] 已恢复: scene={STATE['scene']} k_vol={STATE['k_vol']} "
+          f"studio_visible={STATE['studio_visible']} mute={_mute_state}")
 
 
 def reset_mute_state():
@@ -460,7 +470,7 @@ _player_io_exec = concurrent.futures.ThreadPoolExecutor(
 _tray_icon = None       # pystray 托盘图标(供刷新)
 _tray_thread_id = None  # 托盘消息泵所在线程 id;update_menu 只能在该线程调(跨线程改 Win32 菜单会崩)
 _tray_hwnd = None       # 托盘消息窗 HWND(PostMessage 跨线程唤醒托盘线程刷新用)
-_last_needs_name_mid = None  # 最近一首"待命名"入库的 mid(点通知气泡→改名)
+_last_import_mid = None  # 最近一首入库的 mid(=当前气泡通知对应的歌;点气泡→改它)
 # 自定义窗口消息:WM_USER(0x400) pystray 自用 +10(STOP)/+11(NOTIFY);我们用 +20 触发刷新
 WM_TRAY_REFRESH = 0x400 + 20
 NIN_BALLOONUSERCLICK = 0x0405   # 用户点了气泡通知(经托盘回调消息 lParam 送达)
@@ -617,9 +627,11 @@ async def _handle_cmd(data):
         if STATE.get("studio_visible", True):
             if studio_win.hide():
                 STATE["studio_visible"] = False
+                _save_persist()      # 显隐状态跨重启持久(同场景/音量)
         else:
             if studio_win.show():
                 STATE["studio_visible"] = True
+                _save_persist()
     elif cmd == "player_toggle":
         toggle_player()
     # ── K歌:点歌队列 + 播放控制 ──
@@ -875,33 +887,62 @@ def _on_lib_change():
 
 
 def _on_lib_import(mid, meta, count):
-    """单曲入库成功 → 系统通知(托盘气泡):什么歌导入成功、现在库存几首。
-    若歌名从 QRC 提不准(needs_name,如成都存成数字ID),通知提示"点此改名",记下 mid,
-    用户点气泡即弹改名框。pystray 的 notify 底层是 Shell_NotifyIcon(NIF_INFO),无 update_menu
+    """单曲入库成功 → 系统通知(托盘气泡):什么歌导入成功、现在库存几首。**每首都记 _last_import_mid**
+    (=当前气泡对应的歌),点气泡即弹它的改名框——不管歌名准不准都能点改。needs_name(如成都存成
+    数字ID)额外提示"点此改名"。pystray 的 notify 底层是 Shell_NotifyIcon(NIF_INFO),无 update_menu
     的线程亲和限制,可从 library 监听线程直接调;托盘没起(--headless)就跳过。"""
-    global _last_needs_name_mid
+    global _last_import_mid
     if _tray_icon is None:
         return
+    _last_import_mid = mid       # 每次入库都更新:点气泡永远编辑"这条通知的歌",不再串到上一首
     title = (meta.get("title") or "").strip() or mid
     artist = (meta.get("artist") or "").strip()
     name = f"{title} - {artist}" if artist else title
     if meta.get("needs_name"):
-        _last_needs_name_mid = mid
         msg = f"《{name}》已入库(歌名可能不准)。点此通知修改歌名/歌手。曲库 {count} 首"
     else:
-        msg = f"《{name}》已入库,曲库现有 {count} 首"
+        msg = f"《{name}》已入库,曲库现有 {count} 首。点此可改名"
     try:
         _tray_icon.notify(msg, "K歌曲库 · 导入成功")
     except Exception as e:
         print(f"[LIB] 入库通知失败: {e}")
 
 
+def _build_edit_form(container, mid, on_saved):
+    """在 container(Tk 或 Toplevel)里搭"歌名/歌手"两栏编辑 + 保存/取消。保存→library.rename
+    →on_saved()→销毁 container。供"点通知改名"和"曲库管理里双击改"共用。"""
+    import tkinter as tk
+    meta = library.song_meta(mid) or {}
+    tk.Label(container, text="歌名:").grid(row=0, column=0, padx=10, pady=(12, 6), sticky="e")
+    e_t = tk.Entry(container, width=32)
+    e_t.grid(row=0, column=1, padx=10, pady=(12, 6))
+    e_t.insert(0, (meta.get("title") or "").strip())
+    tk.Label(container, text="歌手:").grid(row=1, column=0, padx=10, pady=6, sticky="e")
+    e_a = tk.Entry(container, width=32)
+    e_a.grid(row=1, column=1, padx=10, pady=6)
+    e_a.insert(0, (meta.get("artist") or "").strip())
+
+    def _ok(*_):
+        t, a = e_t.get().strip(), e_a.get().strip()
+        if t:
+            library.rename(mid, t, a)      # 更新曲库 + 刷托盘 + 推手机
+            if on_saved:
+                on_saved()
+        container.destroy()
+
+    tk.Button(container, text="取消", width=8, command=container.destroy).grid(
+        row=2, column=0, padx=10, pady=(6, 12))
+    tk.Button(container, text="保存", width=10, command=_ok).grid(
+        row=2, column=1, padx=10, pady=(6, 12), sticky="e")
+    container.bind("<Return>", _ok)
+    container.after(100, lambda: (e_t.focus_set(),))
+
+
 def _open_rename_dialog(mid):
-    """弹一个两栏(歌名/歌手)编辑框改名。tkinter 在**独立线程**跑自己的 mainloop——绝不阻塞
-    托盘消息泵(同 do_quit 的教训:在托盘回调里开模态框会占死消息泵)。保存 → library.rename。"""
+    """点通知气泡 → 独立窗口改一首歌名。tkinter 在**独立线程**跑自己的 mainloop——绝不阻塞托盘
+    消息泵(同 do_quit 教训:在托盘回调里开模态框会占死消息泵)。"""
     if not mid:
         return
-    meta = library.song_meta(mid) or {}
 
     def _dlg():
         try:
@@ -910,32 +951,93 @@ def _open_rename_dialog(mid):
             root.title("修改歌名 · K歌曲库")
             root.attributes("-topmost", True)
             root.resizable(False, False)
-            tk.Label(root, text="歌名:").grid(row=0, column=0, padx=10, pady=(12, 6), sticky="e")
-            e_t = tk.Entry(root, width=32)
-            e_t.grid(row=0, column=1, padx=10, pady=(12, 6))
-            e_t.insert(0, (meta.get("title") or "").strip())
-            tk.Label(root, text="歌手:").grid(row=1, column=0, padx=10, pady=6, sticky="e")
-            e_a = tk.Entry(root, width=32)
-            e_a.grid(row=1, column=1, padx=10, pady=6)
-            e_a.insert(0, (meta.get("artist") or "").strip())
-
-            def _ok(*_):
-                t, a = e_t.get().strip(), e_a.get().strip()
-                if t:
-                    library.rename(mid, t, a)   # 更新曲库 + 刷托盘 + 推手机
-                root.destroy()
-
-            tk.Button(root, text="取消", width=8, command=root.destroy).grid(
-                row=2, column=0, padx=10, pady=(6, 12))
-            tk.Button(root, text="保存入库", width=10, command=_ok).grid(
-                row=2, column=1, padx=10, pady=(6, 12), sticky="e")
-            root.bind("<Return>", _ok)
-            root.after(100, lambda: (root.focus_force(), e_t.focus_set()))
+            _build_edit_form(root, mid, on_saved=None)
+            root.after(120, root.focus_force)
             root.mainloop()
         except Exception as ex:
             print(f"[LIB] 改名对话框失败: {ex}")
 
     threading.Thread(target=_dlg, daemon=True).start()
+
+
+def _open_library_browser():
+    """点托盘"曲库: N 首" → 曲库管理窗:按入库时间**倒序**列出全部歌,搜索框实时过滤,双击(或
+    选中点"编辑")改歌名/歌手。独立线程单 Tk 根 + 子 Toplevel 编辑(同根同线程,稳)。"""
+
+    def _win():
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+            root = tk.Tk()
+            root.title("K歌曲库管理")
+            root.geometry("600x440")
+            root.attributes("-topmost", True)
+
+            top = tk.Frame(root)
+            top.pack(fill="x", padx=10, pady=(10, 4))
+            tk.Label(top, text="搜索:").pack(side="left")
+            q = tk.StringVar()
+            tk.Entry(top, textvariable=q).pack(side="left", fill="x", expand=True, padx=6)
+            count_var = tk.StringVar()
+            tk.Label(top, textvariable=count_var).pack(side="left")
+
+            cols = ("artist", "added")
+            tree = ttk.Treeview(root, columns=cols, show="tree headings", height=15)
+            tree.heading("#0", text="歌名")
+            tree.heading("artist", text="歌手")
+            tree.heading("added", text="入库时间")
+            tree.column("#0", width=300)
+            tree.column("artist", width=140)
+            tree.column("added", width=120, anchor="center")
+            tree.pack(fill="both", expand=True, padx=10, pady=4)
+
+            def refresh():
+                tree.delete(*tree.get_children())
+                kw = q.get().strip().lower()
+                items = sorted(library.manifest().items(),
+                               key=lambda kv: kv[1].get("added", 0), reverse=True)
+                shown = 0
+                for mid, m in items:
+                    title = (m.get("title") or "").strip()
+                    artist = (m.get("artist") or "").strip()
+                    if kw and kw not in title.lower() and kw not in artist.lower():
+                        continue
+                    ts = m.get("added", 0)
+                    tstr = time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else ""
+                    tag = "junk" if m.get("needs_name") else ""
+                    tree.insert("", "end", iid=mid, text=title or "(待命名)",
+                                values=(artist, tstr), tags=(tag,))
+                    shown += 1
+                tree.tag_configure("junk", foreground="#c0392b")
+                count_var.set(f"共 {shown} 首")
+
+            def on_edit(*_):
+                sel = tree.selection()
+                if not sel:
+                    return
+                mid = sel[0]
+                dlg = tk.Toplevel(root)
+                dlg.title("修改歌名")
+                dlg.attributes("-topmost", True)
+                dlg.resizable(False, False)
+                dlg.grab_set()                       # 模态(同根,安全)
+                _build_edit_form(dlg, mid, on_saved=refresh)
+
+            q.trace_add("write", lambda *a: refresh())
+            tree.bind("<Double-1>", on_edit)
+
+            bar = tk.Frame(root)
+            bar.pack(fill="x", padx=10, pady=(0, 10))
+            tk.Button(bar, text="编辑选中", width=10, command=on_edit).pack(side="left")
+            tk.Button(bar, text="关闭", width=8, command=root.destroy).pack(side="right")
+
+            refresh()
+            root.after(120, root.focus_force)
+            root.mainloop()
+        except Exception as ex:
+            print(f"[LIB] 曲库管理窗失败: {ex}")
+
+    threading.Thread(target=_win, daemon=True).start()
 
 
 # ── K歌:发指令给播放器 + 点歌队列 ──────────────────────
@@ -1076,10 +1178,8 @@ def run_tray(url):
     def on_toggle_karaoke(icon, item):
         toggle_player()
 
-    def on_rename_pending(icon, item):
-        pend = library.pending_rename()
-        if pend:
-            _open_rename_dialog(pend[0])   # 打开第一首待命名的改名框
+    def on_open_library(icon, item):
+        _open_library_browser()        # 打开曲库管理窗(倒序列表 + 搜索 + 编辑)
 
     # 菜单项文本用可调用;但 pystray-win32 右键弹的是缓存菜单、**不会**在打开时重新求值,
     # 需靠 refresh_tray()→update_menu() 主动刷(见 refresh_tray 注释)。
@@ -1088,15 +1188,8 @@ def run_tray(url):
         pystray.MenuItem(
             lambda i: f"Studio One MIDI: {'已连接' if STATE['studio_connected'] else '未连接'}",
             None, enabled=False),
-        pystray.MenuItem(lambda i: f"曲库: {STATE['lib_count']} 首", None, enabled=False),
-        pystray.MenuItem(
-            lambda i: f"监听: {'运行中' if STATE['watcher_running'] else '已停'}",
-            None, enabled=False),
-        # 待命名(歌名提不准的歌):仅有待命名时显示,点开弹改名框
-        pystray.MenuItem(
-            lambda i: f"✎ 待命名 ({len(library.pending_rename())}) — 点此改名",
-            on_rename_pending,
-            visible=lambda i: bool(library.pending_rename())),
+        # 曲库:可点击 → 曲库管理窗(倒序/搜索/编辑歌名歌手)
+        pystray.MenuItem(lambda i: f"曲库: {STATE['lib_count']} 首 — 点击管理", on_open_library),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(
             "K歌歌词", on_toggle_karaoke,
@@ -1113,7 +1206,7 @@ def run_tray(url):
 
     def _on_tray_notify(wparam, lparam):
         if lparam == NIN_BALLOONUSERCLICK:
-            _open_rename_dialog(_last_needs_name_mid)
+            _open_rename_dialog(_last_import_mid)   # 点气泡→编辑该通知对应的歌
             return 0
         return _orig_on_notify(wparam, lparam)
 
