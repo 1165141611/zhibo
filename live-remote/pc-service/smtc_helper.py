@@ -18,18 +18,27 @@ def main():
     except Exception:
         pass
     last = None
+    beat = 0.0
     while True:
         try:
             snap = asyncio.run(smtc.snapshot())
         except Exception:
             snap = None
+        line = None
         if snap is not None and snap != last:
+            line = json.dumps(snap)
+        elif time.monotonic() - beat >= 5.0:
+            line = "{}"   # 心跳:即使快照不变也定期写一次,及时发现管道已断(否则父进程
+                          # 崩了、又恰好没歌在播,本进程永远不写 stdout → 成关不掉的孤儿)
+        if line is not None:
             try:
-                sys.stdout.write(json.dumps(snap) + "\n")
+                sys.stdout.write(line + "\n")
                 sys.stdout.flush()
             except Exception:
                 break  # 主进程关了管道,退出
-            last = snap
+            beat = time.monotonic()
+            if snap is not None and snap != last:
+                last = snap
         time.sleep(1.0)
 
 

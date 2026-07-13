@@ -15,12 +15,14 @@
 import os
 import sys
 import json
+import time
 import socket
 import ctypes
 import asyncio
 import threading
 import subprocess
 import warnings
+import concurrent.futures
 
 warnings.filterwarnings("ignore")  # 屏蔽 pycaw 对未接入设备的无害 COMError 警告
 
@@ -32,10 +34,13 @@ from pycaw.pycaw import (AudioUtilities, ISimpleAudioVolume,
 
 import winmm_midi
 import studio_win
-import scrcpy_win
+import karaoke_win
+import library
+import karaoke_data
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 
 import config
 
@@ -65,8 +70,15 @@ STATE = {
     "bgm_dur": 0,              # 总时长(秒)
     "bgm_playing": True,       # 播放状态(渐变方向 + 进度条;假定启动时在播)
     "studio_visible": True,    # Studio One 窗口是否显示
-    "scrcpy_ok": False,        # scrcpy 无线投屏是否已就绪
-    "scrcpy_msg": "",          # scrcpy 最近一次尝试的说明(失败原因等)
+    "player_visible": False,   # K歌歌词窗口是否显示(初始隐藏,由服务器托管)
+    "lib_count": 0,            # 曲库已入库首数
+    "watcher_running": False,  # 曲库监听线程是否在跑
+    # ── K歌播放器状态(来自播放器 stdout 的 STATE 上报)──
+    "k_playing": False, "k_pos": 0, "k_dur": 0, "k_key": 0, "k_vocal": False,
+    "k_vol": 100,              # 伴奏音量 0-100(手机音量键同步)
+    "k_mid": "", "k_title": "", "k_artist": "",
+    "now": None,               # 正在唱 {mid,title,artist} 或 None(空闲)
+    "queue": [],               # 等待队列 [{mid,title,artist}...]
 }
 
 # ══════════════════════════════════════════════════════════
@@ -95,12 +107,60 @@ def open_midi():
 _mute_state = {note: False for note in config.VOCAL_MUTE_NOTES.values()}
 _midi_in = None
 
+# ── 跨重启持久缓存:声卡场景 + 静音记录 + 演唱(伴奏)音量 ──────────────
+# Studio One 和播放器在服务重启期间状态不变,所以把"场景/静音记录"原样存盘、启动时恢复记录
+# (**不发 MIDI**,记录=现实即可继续准确切换);k_vol 恢复后在拉起播放器时下发一次。
+PERSIST_PATH = os.path.join(BASE_DIR, "state_cache.json")
+_persist_lock = threading.Lock()
+
+
+def _save_persist():
+    """把需继承的状态写盘(整写小 JSON,先写临时文件再原子替换;失败只打日志不影响运行)。"""
+    try:
+        with _persist_lock:
+            data = {
+                "scene": STATE.get("scene"),
+                "mute_state": {str(k): bool(v) for k, v in _mute_state.items()},
+                "k_vol": int(STATE.get("k_vol", 100)),
+            }
+            tmp = PERSIST_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, PERSIST_PATH)
+    except Exception as e:
+        print(f"[PERSIST] 写入失败: {e}")
+
+
+def _restore_persist():
+    """启动时恢复上次的场景/静音记录/演唱音量(文件缺失或损坏则保持默认)。"""
+    try:
+        with open(PERSIST_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+    ms = data.get("mute_state") or {}
+    for note in list(_mute_state.keys()):
+        if str(note) in ms:
+            _mute_state[note] = bool(ms[str(note)])
+    if data.get("scene") is not None:
+        try:
+            STATE["scene"] = int(data["scene"])
+        except Exception:
+            pass
+    if data.get("k_vol") is not None:
+        try:
+            STATE["k_vol"] = max(0, min(100, int(data["k_vol"])))
+        except Exception:
+            pass
+    print(f"[PERSIST] 已恢复: scene={STATE['scene']} k_vol={STATE['k_vol']} mute={_mute_state}")
+
 
 def reset_mute_state():
     """归位:把记录重置为"全不静音"。配合"把 4 条 M 都关掉"使用,恢复同步。"""
     for note in config.VOCAL_MUTE_NOTES.values():
         _mute_state[note] = False
     STATE["scene"] = None
+    _save_persist()
 
 
 def _on_feedback(status, d1, d2):
@@ -177,7 +237,7 @@ _tls = threading.local()
 
 
 def _ensure_com():
-    """pycaw 走 COM,每个线程首次调用前需 CoInitialize。"""
+    """pycaw 走 COM,每个线程首次调用前需 CoInitialize(专用线程用 MTA,见 _pycaw_thread_init)。"""
     if not getattr(_tls, "inited", False):
         try:
             comtypes.CoInitialize()
@@ -186,9 +246,41 @@ def _ensure_com():
         _tls.inited = True
 
 
+# ── 专用 pycaw/COM 工作线程(关键:防段错误) ──────────────────
+# 所有 pycaw(Windows Core Audio COM)操作都丢到这**一条**线程串行执行,且该线程用
+# **MTA(多线程套间)**初始化。原来 pycaw 直接跑在 uvicorn 异步线程(STA、无消息泵),
+# 一旦 QQ音乐 有活跃会话、演唱↔BGM 联动触发音量渐变(连发 20 次 SetMasterVolume),
+# 就会因套间/消息泵问题原生崩溃(用户点歌开唱瞬间服务端闪退即此)。丢到独立 MTA 线程后
+# COM 调用无需泵消息、无跨套间、天然串行,彻底规避。
+def _pycaw_thread_init():
+    try:
+        comtypes.CoInitializeEx(getattr(comtypes, "COINIT_MULTITHREADED", 0x0))
+    except Exception:
+        pass   # 已被初始化过(RPC_E_CHANGED_MODE)则沿用现状
+    _tls.inited = True
+
+
+_pycaw_exec = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="pycaw", initializer=_pycaw_thread_init)
+
+
+def _pycaw_call(fn, *args):
+    """把一个 pycaw 操作调度到专用 MTA 线程执行并等结果。异常/超时返回 None,绝不让 COM 崩主进程。"""
+    try:
+        return _pycaw_exec.submit(fn, *args).result(timeout=8)
+    except Exception as e:
+        print(f"[VOL] pycaw 调用异常: {e}")
+        return None
+
+
 # 这台机器是 ROUTIST R2 声卡,QQ音乐 会同时出现在多个虚拟路由(设备)上。
 # 所以要跨"所有活跃设备"找出全部 QQ音乐 会话,音量一起调,谁喂给监听/直播都同步。
 _qq_vols = []  # 缓存:所有匹配到的 ISimpleAudioVolume
+# 指针坟场:被丢弃的会话指针**永久持有引用、绝不释放**。QQ暂停/切歌后其 COM 指针悬空,
+# 若任由 GC 触发 comtypes __del__→Release(),就是对已释放内存写 → access violation 连环崩
+# (2026-07-13 实崩:server.log 连环 "access violation writing ..." 后进程死)。
+# 每个指针就几十字节,常驻服务漏这点无所谓,稳定性优先。
+_qq_graveyard = []
 
 
 def _proc_name(pid):
@@ -198,8 +290,22 @@ def _proc_name(pid):
         return ""
 
 
+def _qq_running():
+    """QQ音乐相关进程是否存在。不存在就别去枚举 35 个音频设备(白折腾 COM,还添崩溃面)。"""
+    targets = [p.lower() for p in config.QQMUSIC_PROCS]
+    try:
+        for p in psutil.process_iter(["name"]):
+            if (p.info.get("name") or "").lower() in targets:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _resolve_qq_sessions():
     """跨所有活跃设备,收集所有 QQ音乐 相关会话的音量接口。"""
+    if not _qq_running():
+        return []
     _ensure_com()
     targets = [p.lower() for p in config.QQMUSIC_PROCS]
     vols = []
@@ -223,46 +329,119 @@ def _resolve_qq_sessions():
     return vols
 
 
+_QQ_RESOLVE_INTERVAL = 1.5   # 缓存为空时最短重解析间隔(秒)。防高频枚举 35 个设备把 COM 打崩
+_qq_resolve_at = 0.0         # 上次解析时刻(monotonic)
+
+
 def _qq_vols_cached():
-    global _qq_vols
+    """返回缓存的 QQ音乐 音量会话。为空且距上次解析≥间隔才重解析(限频,防枚举风暴)。"""
+    global _qq_vols, _qq_resolve_at
     if not _qq_vols:
-        _qq_vols = _resolve_qq_sessions()
+        now = time.monotonic()
+        if now - _qq_resolve_at >= _QQ_RESOLVE_INTERVAL:
+            _qq_resolve_at = now
+            _qq_vols = _resolve_qq_sessions()
     return _qq_vols
 
 
-def set_qq_volume(pct):
-    global _qq_vols
+def _clear_qq_cache(allow_reresolve=True):
+    """丢弃缓存的会话指针(QQ暂停/切歌后其 COM 指针会悬空,继续调用会段错误)。
+    丢弃 = 移进坟场永久持有,**绝不能让 GC Release 悬空指针**(见 _qq_graveyard 注释)。
+    allow_reresolve=True 时顺带清空限频计时,允许下次立即重解析(暂停↔播放切换需要)。"""
+    global _qq_vols, _qq_resolve_at
+    _qq_graveyard.extend(_qq_vols)
+    _qq_vols = []
+    if allow_reresolve:
+        _qq_resolve_at = 0.0
+
+
+def _set_qq_volume_impl(pct):
+    """设 QQ音乐 音量。**只用缓存会话、单次尝试**;失败即清缓存(交给下次限频重解析),
+    绝不在一次调用里反复枚举设备——高频枚举正是段错误根源。"""
     pct = max(0, min(100, pct))
-    vols = _qq_vols_cached()
-    ok, stale = False, False
-    for v in vols:
+    ok = False
+    for v in list(_qq_vols_cached()):
         try:
             v.SetMasterVolume(pct / 100.0, None)
             ok = True
         except Exception:
-            stale = True
-    if stale or not vols:
-        # 会话失效(QQ音乐重启/切换设备)→ 重新解析一次再试
-        _qq_vols = _resolve_qq_sessions()
-        for v in _qq_vols:
-            try:
-                v.SetMasterVolume(pct / 100.0, None)
-                ok = True
-            except Exception:
-                pass
+            _clear_qq_cache(allow_reresolve=False)   # 指针失效 → 清缓存,下次限频再解析
+            break
     return ok
 
 
-def get_qq_volume():
-    global _qq_vols
-    for attempt in range(2):
-        for v in _qq_vols_cached():
-            try:
-                return int(round(v.GetMasterVolume() * 100))
-            except Exception:
-                continue
-        _qq_vols = _resolve_qq_sessions()  # 第一次读失败就重解析后再读
+def _get_qq_volume_impl():
+    for v in list(_qq_vols_cached()):
+        try:
+            return int(round(v.GetMasterVolume() * 100))
+        except Exception:
+            _clear_qq_cache(allow_reresolve=False)
+            break
     return None
+
+
+def set_qq_volume(pct):
+    """公开接口:调度到专用 pycaw 线程执行(防 COM 段错误)。返回是否成功。"""
+    return bool(_pycaw_call(_set_qq_volume_impl, pct))
+
+
+def get_qq_volume():
+    """公开接口:调度到专用 pycaw 线程执行。返回 0-100 或 None。"""
+    return _pycaw_call(_get_qq_volume_impl)
+
+
+# ── 非阻塞音量:coalesced(合并),绝不在事件循环里 .result() 等 pycaw ──────────
+# 老写法在 _handle_cmd 里 set_qq_volume(v) 会 .result(timeout=8) 阻塞事件循环;若此刻
+# 渐变正占着单线程 pycaw 执行器,整个循环卡死→手机按钮全失灵、状态不再广播。
+# 现改为:STATE 乐观更新(UI 立即跟手)+ 把"最新目标值"丢到 pycaw 线程,连拖只应用最后一档。
+_qq_vol_lock = threading.Lock()
+_qq_vol_target = None      # 待应用的最新音量(0-100);None=无待办
+_qq_vol_running = False    # pump 是否已在 pycaw 线程上跑
+
+
+def _qq_vol_pump():
+    """在 pycaw 线程上把待办音量应用完(期间又来新值就应用最新的),排空后退出。"""
+    global _qq_vol_target, _qq_vol_running
+    while True:
+        with _qq_vol_lock:
+            tgt = _qq_vol_target
+            _qq_vol_target = None
+            if tgt is None:
+                _qq_vol_running = False
+                return
+        try:
+            _set_qq_volume_impl(tgt)
+        except Exception:
+            pass
+
+
+def schedule_qq_volume(v):
+    """把设音量丢到 pycaw 线程(合并高频拖动),不阻塞事件循环。"""
+    global _qq_vol_target, _qq_vol_running
+    v = max(0, min(100, int(v)))
+    with _qq_vol_lock:
+        _qq_vol_target = v
+        if _qq_vol_running:
+            return          # pump 还在跑,它会读走最新 target
+        _qq_vol_running = True
+    try:
+        _pycaw_exec.submit(_qq_vol_pump)
+    except Exception:
+        with _qq_vol_lock:
+            _qq_vol_running = False
+
+
+def schedule_qq_volume_read():
+    """异步读一次 QQ音乐 音量,读到就更新 STATE 并推手机。不阻塞事件循环。"""
+    def work():
+        v = _get_qq_volume_impl()
+        if v is not None and STATE.get("bgm_vol") != v:
+            STATE["bgm_vol"] = v
+            _threadsafe_broadcast()
+    try:
+        _pycaw_exec.submit(work)
+    except Exception:
+        pass
 
 
 # ══════════════════════════════════════════════════════════
@@ -272,6 +451,21 @@ app = FastAPI()
 _clients = set()
 _loop = None            # uvicorn 的事件循环(供子进程读取线程跨线程广播)
 _smtc_proc = None       # winrt 子进程
+_player_proc = None     # K歌播放器子进程
+_player_lock = threading.Lock()   # 串行化对播放器 stdin 的写(读取线程自动下一首 vs 事件循环手动切歌)
+# 专用单线程 IO 执行器:所有发往播放器 stdin 的写都丢到这里 FIFO 有序执行,
+# 让事件循环**永不**因阻塞的管道写而卡住(手机连点时尤其关键)。
+_player_io_exec = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="player-io")
+_tray_icon = None       # pystray 托盘图标(供刷新)
+_tray_thread_id = None  # 托盘消息泵所在线程 id;update_menu 只能在该线程调(跨线程改 Win32 菜单会崩)
+_tray_hwnd = None       # 托盘消息窗 HWND(PostMessage 跨线程唤醒托盘线程刷新用)
+_last_needs_name_mid = None  # 最近一首"待命名"入库的 mid(点通知气泡→改名)
+# 自定义窗口消息:WM_USER(0x400) pystray 自用 +10(STOP)/+11(NOTIFY);我们用 +20 触发刷新
+WM_TRAY_REFRESH = 0x400 + 20
+NIN_BALLOONUSERCLICK = 0x0405   # 用户点了气泡通知(经托盘回调消息 lParam 送达)
+_queue = []             # 点歌等待队列(mid 列表)
+_now_mid = None         # 正在唱的 mid(None=空闲)
 
 
 @app.on_event("startup")
@@ -285,13 +479,14 @@ def start_smtc_reader():
     def worker():
         global _smtc_proc
         helper = os.path.join(BASE_DIR, "smtc_helper.py")
+        _env = dict(os.environ, PYTHONIOENCODING="utf-8")   # 子进程 std 流强制 UTF-8(BGM 中文歌名)
         while True:
             try:
                 _smtc_proc = subprocess.Popen(
                     [sys.executable, helper],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     creationflags=0x08000000,  # CREATE_NO_WINDOW
-                    text=True, encoding="utf-8",
+                    text=True, encoding="utf-8", errors="replace", env=_env,
                 )
             except Exception as e:
                 print(f"[BGM] 启动 winrt 子进程失败: {e}")
@@ -330,24 +525,52 @@ async def _broadcast():
 _fading = False
 
 
+# 关键:整段渐变**都在专用 pycaw 线程一次跑完**(解析一次会话、用缓存指针逐步调、线程内 sleep),
+# 而不是从异步线程连发几十次 set_qq_volume(每次可能重枚举设备)——后者正是"点歌开唱瞬间服务端闪退"的根源。
+def _fade_out_pause_impl():
+    full = _get_qq_volume_impl() or STATE.get("bgm_vol") or 60
+    steps = 20
+    dt = config.FADE_SECONDS / steps if config.FADE_SECONDS > 0 else 0
+    _qq_vols_cached()                       # 解析一次(填缓存),后续步骤复用,不再枚举
+    for i in range(steps - 1, -1, -1):
+        _set_qq_volume_impl(round(full * i / steps))
+        if dt:
+            time.sleep(dt)
+    _tap_media(VK_MEDIA_PLAY_PAUSE)         # 暂停
+    _clear_qq_cache()                       # 暂停后会话指针悬空 → 丢弃,严禁再用(会崩)
+    return full
+
+
+def _play_fade_in_impl():
+    full = STATE.get("bgm_vol") or _get_qq_volume_impl() or 60
+    _clear_qq_cache()
+    _tap_media(VK_MEDIA_PLAY_PAUSE)         # 播放(QQ 起新会话)
+    time.sleep(0.2)
+    _clear_qq_cache()                       # 用播放后的新会话
+    steps = 20
+    dt = config.FADE_SECONDS / steps if config.FADE_SECONDS > 0 else 0
+    _qq_vols_cached()
+    for i in range(1, steps + 1):
+        _set_qq_volume_impl(round(full * i / steps))
+        if dt:
+            time.sleep(dt)
+    return full
+
+
+async def _run_pycaw(fn):
+    """把整段(阻塞的)pycaw 渐变丢到专用线程执行,事件循环不阻塞。"""
+    return await asyncio.get_running_loop().run_in_executor(_pycaw_exec, fn)
+
+
 async def _fade_out_pause():
-    """渐弱到 0 → 暂停 → 恢复会话音量(此时已静默)。"""
+    """渐弱 → 暂停 QQ音乐(整段在 pycaw 线程执行,防 COM 段错误)。"""
     global _fading
     if _fading:
         return
     _fading = True
     try:
-        full = get_qq_volume() or STATE.get("bgm_vol") or 60
-        steps = 20
-        dt = config.FADE_SECONDS / steps if config.FADE_SECONDS > 0 else 0
-        for i in range(steps - 1, -1, -1):
-            set_qq_volume(round(full * i / steps))
-            if dt:
-                await asyncio.sleep(dt)
-        _tap_media(VK_MEDIA_PLAY_PAUSE)     # 暂停
-        await asyncio.sleep(0.1)
-        set_qq_volume(full)                 # 恢复音量(已暂停,无声)
-        STATE["bgm_vol"] = full
+        full = await _run_pycaw(_fade_out_pause_impl)
+        STATE["bgm_vol"] = full or STATE.get("bgm_vol") or 60
         STATE["bgm_playing"] = False
     finally:
         _fading = False
@@ -355,41 +578,27 @@ async def _fade_out_pause():
 
 
 async def _play_fade_in():
-    """会话音量设 0 → 播放 → 渐强回原值。"""
+    """播放 QQ音乐 → 渐强(整段在 pycaw 线程执行)。"""
     global _fading
     if _fading:
         return
     _fading = True
     try:
-        full = get_qq_volume() or STATE.get("bgm_vol") or 60
-        set_qq_volume(0)
-        _tap_media(VK_MEDIA_PLAY_PAUSE)     # 播放
-        steps = 20
-        dt = config.FADE_SECONDS / steps if config.FADE_SECONDS > 0 else 0
-        for i in range(1, steps + 1):
-            set_qq_volume(round(full * i / steps))
-            if dt:
-                await asyncio.sleep(dt)
-        STATE["bgm_vol"] = full
+        full = await _run_pycaw(_play_fade_in_impl)
+        STATE["bgm_vol"] = full or STATE.get("bgm_vol") or 60
         STATE["bgm_playing"] = True
     finally:
         _fading = False
     await _broadcast()
 
 
-async def _handle_cmd(data, phone_ip=None):
+async def _handle_cmd(data):
     cmd = data.get("cmd")
-    if cmd == "ensure_scrcpy":
-        # 进入悬浮态时由网页触发:确保无线 adb 已连 + scrcpy 在跑。
-        # 阻塞的 adb/scrcpy 调用丢到线程池,别卡住事件循环。
-        ok, msg = await asyncio.to_thread(scrcpy_win.ensure_scrcpy, phone_ip)
-        STATE["scrcpy_ok"] = ok
-        STATE["scrcpy_msg"] = msg
-        print(f"[SCRCPY] ip={phone_ip} ok={ok} {msg}")
-    elif cmd == "scene":
+    if cmd == "scene":
         sid = int(data.get("id"))
         if send_scene(sid):
             STATE["scene"] = sid
+            _save_persist()
     elif cmd == "bgm":
         action = data.get("action")
         if action == "next":
@@ -411,15 +620,47 @@ async def _handle_cmd(data, phone_ip=None):
         else:
             if studio_win.show():
                 STATE["studio_visible"] = True
+    elif cmd == "player_toggle":
+        toggle_player()
+    # ── K歌:点歌队列 + 播放控制 ──
+    elif cmd == "kqueue_add":
+        k_enqueue(data.get("mid"))
+    elif cmd == "kqueue_remove":
+        k_remove(int(data.get("idx", -1)))
+    elif cmd == "kqueue_next":
+        k_play_next()
+    elif cmd == "kqueue_clear":
+        k_clear()
+    elif cmd == "kqueue_move":
+        k_move(int(data.get("from", -1)), int(data.get("to", -1)))
+    elif cmd == "kplay":
+        _player_send("play")
+    elif cmd == "kpause":
+        _player_send("pause")
+    elif cmd == "kplaypause":
+        _player_send("playpause")
+    elif cmd == "kkey":
+        _player_send("key " + str(int(data.get("semi", 0))))
+    elif cmd == "kvocal":
+        _player_send("vocal " + ("1" if data.get("on") else "0"))
+    elif cmd == "kvol":
+        v = max(0, min(100, int(data.get("value", 100))))
+        STATE["k_vol"] = v            # 乐观更新,播放器 STATE 上报会再校正
+        _save_persist()
+        _player_send("vol " + str(v))
+    elif cmd == "kseek":
+        _player_send("seek " + str(int(data.get("ms", 0))))
+    elif cmd == "kshow":
+        _player_send("show")
+    elif cmd == "khide":
+        _player_send("hide")
     elif cmd == "bgm_vol":
-        v = int(data.get("value"))
-        if set_qq_volume(v):
-            STATE["bgm_vol"] = v
+        v = max(0, min(100, int(data.get("value"))))
+        STATE["bgm_vol"] = v          # 乐观更新:滑条立即跟手
+        schedule_qq_volume(v)         # 实际设音量丢到 pycaw 线程,合并高频拖动,不阻塞循环
     elif cmd == "ping":
-        # 刷新一下音量读数(QQ音乐 可能刚开)
-        v = get_qq_volume()
-        if v is not None:
-            STATE["bgm_vol"] = v
+        # 异步刷新一下音量读数(QQ音乐 可能刚开),不阻塞事件循环
+        schedule_qq_volume_read()
     await _broadcast()
 
 
@@ -427,18 +668,15 @@ async def _handle_cmd(data, phone_ip=None):
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     _clients.add(ws)
-    phone_ip = ws.client.host if ws.client else None   # 手机局域网 IP,供 scrcpy 匹配
-    # 首次连接时读一次 QQ音乐 音量(pycaw 在本线程,已无 winrt 冲突,安全)
+    # 首次连接时异步读一次 QQ音乐 音量(不阻塞握手;读到后会自动再推一帧 state)
     if STATE.get("bgm_vol") is None:
-        v = get_qq_volume()
-        if v is not None:
-            STATE["bgm_vol"] = v
+        schedule_qq_volume_read()
     await ws.send_text(json.dumps({"type": "state", **STATE}))
     try:
         while True:
             raw = await ws.receive_text()
             try:
-                await _handle_cmd(json.loads(raw), phone_ip)
+                await _handle_cmd(json.loads(raw))
             except Exception as e:
                 print(f"[WS] 处理指令出错: {e}  raw={raw!r}")
     except WebSocketDisconnect:
@@ -447,16 +685,26 @@ async def ws_endpoint(ws: WebSocket):
         _clients.discard(ws)
 
 
-# App 进悬浮前的闸门:问 PC 现在能否经无线 adb 连上这台手机(投屏前提)。
-# 用请求对端 IP 作为手机 IP,避免手机端硬编码。必须在 StaticFiles 挂载前注册。
-@app.get("/scrcpy/check")
-async def scrcpy_check(request: Request):
-    ip = request.client.host if request.client else None
-    ok, msg = await asyncio.to_thread(scrcpy_win.can_reach, ip)
-    return {"reachable": ok, "phone_ip": ip, "msg": msg}
+# 曲库列表(手机点歌用):返回 [{mid,title,artist}]。必须在 StaticFiles 挂载前注册。
+@app.get("/library")
+async def get_library():
+    man = library.manifest()
+    songs = [{"mid": m, "title": v.get("title", ""), "artist": v.get("artist", "")}
+             for m, v in man.items()]
+    songs.sort(key=lambda s: (s["title"] or ""))
+    return {"count": len(songs), "songs": songs}
 
 
-# 测试网页(static/index.html)挂在根路径。ws / scrcpy 路由已先注册,不受影响。
+# 卡拉OK数据(手机演唱页用):某首歌的 QRC 逐字时间轴 + .note 音高线(归一化)。
+@app.get("/song/{mid}/karaoke")
+async def get_song_karaoke(mid: str):
+    data = karaoke_data.song_karaoke(mid)
+    if data is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return data
+
+
+# 测试网页(static/index.html)挂在根路径。ws / library 路由已先注册,不受影响。
 if os.path.isdir(STATIC_DIR):
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
@@ -506,7 +754,281 @@ def run_server():
     uvicorn.run(app, host=config.HOST, port=config.PORT, log_level="warning")
 
 
+# ── K歌播放器子进程 + 托盘刷新 ────────────────────────
+def _player_reader(proc):
+    """读播放器 stdout:VIS:0/1(可见性)、STATE {json}(进度/播放/调/原唱)。
+    更新 STATE + 刷托盘 + 推手机;并做"唱完自动下一首"。"""
+    prev_playing = False
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("VIS:"):
+                STATE["player_visible"] = (line[4:] == "1")
+                refresh_tray()
+                _threadsafe_broadcast()
+            elif line.startswith("STATE "):
+                try:
+                    st = json.loads(line[6:])
+                except Exception:
+                    continue
+                vol_before = STATE.get("k_vol")
+                STATE.update({
+                    "k_pos": st["pos"], "k_dur": st["dur"], "k_playing": st["playing"],
+                    "k_key": st["key"], "k_vocal": st["vocal"], "k_mid": st["mid"],
+                    "k_vol": st.get("vol", STATE.get("k_vol", 100)),
+                    "k_title": st["title"], "k_artist": st["artist"],
+                })
+                if STATE.get("k_vol") != vol_before:   # 音量有变才写盘(上报每 500ms 一次)
+                    _save_persist()
+                # 结束检测:曾在播、现在停、且已到尾 → 切到下一首**开头并暂停**(不自动开唱)。
+                # 只在"结束的正是当前曲"时才自动切,避免与手动切歌(事件循环线程)撞车导致跳一首。
+                ended = (prev_playing and not st["playing"]
+                         and st["dur"] > 0 and st["pos"] >= st["dur"] - 800)
+                prev_playing = st["playing"]
+                if ended and _now_mid is not None and st.get("mid") == _now_mid:
+                    k_advance_paused()
+                _threadsafe_broadcast()
+    except Exception:
+        pass
+
+
+def start_player():
+    """拉起 K歌播放器子进程:隐藏、暂停、关 SMTC、指定声卡。stdin 收指令 / stdout 报可见性。
+    不自动重启(面向用户,可能主动关)。"""
+    global _player_proc
+    try:
+        # PYTHONIOENCODING=utf-8:强制子进程 std 流用 UTF-8(否则 Windows 默认 GBK,STATE/VIS 中文歌名
+        # 会让下面 encoding="utf-8" 的读取在第一行就 UnicodeDecodeError 崩掉读取线程 → 管道写满 → 播放器
+        # GUI 卡死无响应)。errors="replace":父进程侧再加一层兜底,任何杂字节也绝不崩读取循环。
+        _env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        _player_proc = subprocess.Popen(
+            [config.PLAYER_PYTHON, config.PLAYER_PATH,
+             "--device", str(config.PLAYER_DEVICE),
+             "--hidden", "--paused", "--no-smtc"],
+            creationflags=0x08000000,        # CREATE_NO_WINDOW
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", bufsize=1, env=_env,
+        )
+        STATE["player_visible"] = False
+        threading.Thread(target=_player_reader, args=(_player_proc,), daemon=True).start()
+        # 播放器默认音量 100,把持久缓存里的演唱音量下发过去(重启继承)
+        _player_send("vol " + str(int(STATE.get("k_vol", 100))))
+        print("[PLAYER] 已拉起 K歌播放器(隐藏)")
+    except Exception as e:
+        print(f"[PLAYER] 启动失败: {e}")
+
+
+def toggle_player():
+    """显隐 K歌播放器窗口。发显式 show/hide 给播放器(它用 Qt 自己显隐才会正确重绘),
+    并**立即在当前(托盘主)线程**更新 STATE + 刷托盘,不等异步 VIS 往返(避免勾选卡住)。
+    VIS 上报仍保留,用于 ESC/关窗等外部隐藏的兜底同步。进程死则懒重建。"""
+    global _player_proc
+    if _player_proc is None or _player_proc.poll() is not None:
+        start_player()               # 进程死了/没拉起 → 重新拉起(隐藏启动)
+        STATE["player_visible"] = False
+        refresh_tray()
+        return
+    want = not STATE.get("player_visible")
+    try:
+        _player_proc.stdin.write(("show" if want else "hide") + "\n")
+        _player_proc.stdin.flush()
+        STATE["player_visible"] = want
+        refresh_tray()
+        if _clients and _loop is not None:
+            asyncio.run_coroutine_threadsafe(_broadcast(), _loop)
+    except Exception as e:
+        print(f"[PLAYER] 发送指令失败: {e}")
+
+
+def refresh_tray():
+    """STATE 变化后刷新托盘菜单(曲库数/监听/勾选)。
+    **update_menu 只能在托盘线程调**——跨线程改 Win32 菜单会段错误(切歌时播放器上报 VIS
+    从读取线程刷托盘导致主程序闪退,即此坑)。且实测 pystray-win32 右键弹菜单用的是**缓存的
+    菜单句柄、不会在打开时重新求值动态 lambda**——所以不主动 update_menu 的话,曲库数/勾选
+    变化后**永远不刷新**(旧代码"下次打开自动刷新"的假设是错的)。故:托盘线程直接调;其它
+    线程 PostMessage 唤醒托盘线程去调(WM_TRAY_REFRESH 由 _dispatcher 在托盘线程分发)。"""
+    if _tray_icon is None:
+        return
+    if _tray_thread_id is None or threading.get_ident() == _tray_thread_id:
+        try:
+            _tray_icon.update_menu()
+        except Exception:
+            pass
+        return
+    if _tray_hwnd:                    # 非托盘线程:marshal 回托盘线程
+        try:
+            ctypes.windll.user32.PostMessageW(_tray_hwnd, WM_TRAY_REFRESH, 0, 0)
+        except Exception:
+            pass
+
+
+def _threadsafe_broadcast():
+    """从任意线程把 STATE 推给手机(WS)。"""
+    if _clients and _loop is not None:
+        asyncio.run_coroutine_threadsafe(_broadcast(), _loop)
+
+
+def _on_lib_change():
+    """曲库变化:刷托盘 + 推手机(手机据此重拉曲库列表)。"""
+    refresh_tray()
+    _threadsafe_broadcast()
+
+
+def _on_lib_import(mid, meta, count):
+    """单曲入库成功 → 系统通知(托盘气泡):什么歌导入成功、现在库存几首。
+    若歌名从 QRC 提不准(needs_name,如成都存成数字ID),通知提示"点此改名",记下 mid,
+    用户点气泡即弹改名框。pystray 的 notify 底层是 Shell_NotifyIcon(NIF_INFO),无 update_menu
+    的线程亲和限制,可从 library 监听线程直接调;托盘没起(--headless)就跳过。"""
+    global _last_needs_name_mid
+    if _tray_icon is None:
+        return
+    title = (meta.get("title") or "").strip() or mid
+    artist = (meta.get("artist") or "").strip()
+    name = f"{title} - {artist}" if artist else title
+    if meta.get("needs_name"):
+        _last_needs_name_mid = mid
+        msg = f"《{name}》已入库(歌名可能不准)。点此通知修改歌名/歌手。曲库 {count} 首"
+    else:
+        msg = f"《{name}》已入库,曲库现有 {count} 首"
+    try:
+        _tray_icon.notify(msg, "K歌曲库 · 导入成功")
+    except Exception as e:
+        print(f"[LIB] 入库通知失败: {e}")
+
+
+def _open_rename_dialog(mid):
+    """弹一个两栏(歌名/歌手)编辑框改名。tkinter 在**独立线程**跑自己的 mainloop——绝不阻塞
+    托盘消息泵(同 do_quit 的教训:在托盘回调里开模态框会占死消息泵)。保存 → library.rename。"""
+    if not mid:
+        return
+    meta = library.song_meta(mid) or {}
+
+    def _dlg():
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.title("修改歌名 · K歌曲库")
+            root.attributes("-topmost", True)
+            root.resizable(False, False)
+            tk.Label(root, text="歌名:").grid(row=0, column=0, padx=10, pady=(12, 6), sticky="e")
+            e_t = tk.Entry(root, width=32)
+            e_t.grid(row=0, column=1, padx=10, pady=(12, 6))
+            e_t.insert(0, (meta.get("title") or "").strip())
+            tk.Label(root, text="歌手:").grid(row=1, column=0, padx=10, pady=6, sticky="e")
+            e_a = tk.Entry(root, width=32)
+            e_a.grid(row=1, column=1, padx=10, pady=6)
+            e_a.insert(0, (meta.get("artist") or "").strip())
+
+            def _ok(*_):
+                t, a = e_t.get().strip(), e_a.get().strip()
+                if t:
+                    library.rename(mid, t, a)   # 更新曲库 + 刷托盘 + 推手机
+                root.destroy()
+
+            tk.Button(root, text="取消", width=8, command=root.destroy).grid(
+                row=2, column=0, padx=10, pady=(6, 12))
+            tk.Button(root, text="保存入库", width=10, command=_ok).grid(
+                row=2, column=1, padx=10, pady=(6, 12), sticky="e")
+            root.bind("<Return>", _ok)
+            root.after(100, lambda: (root.focus_force(), e_t.focus_set()))
+            root.mainloop()
+        except Exception as ex:
+            print(f"[LIB] 改名对话框失败: {ex}")
+
+    threading.Thread(target=_dlg, daemon=True).start()
+
+
+# ── K歌:发指令给播放器 + 点歌队列 ──────────────────────
+def _player_write(cmd):
+    """真正的阻塞写(在 _player_io_exec 单线程上执行,加锁串行防写坏管道)。"""
+    if _player_proc is None or _player_proc.poll() is not None:
+        return
+    try:
+        with _player_lock:
+            _player_proc.stdin.write(cmd + "\n")
+            _player_proc.stdin.flush()
+    except Exception:
+        pass
+
+
+def _player_send(cmd):
+    """异步、有序地把指令投递给播放器:提交到单线程 IO 执行器,立即返回,不阻塞调用方。
+    这样事件循环(_handle_cmd)和读取线程(k_play_next 自动下一首)都不会被管道背压卡住。
+    单线程 FIFO 天然保证 load→show→play 等指令顺序不乱。"""
+    try:
+        _player_io_exec.submit(_player_write, cmd)
+    except Exception:
+        pass
+    return True
+
+
+def _sync_queue_state():
+    """把 _now_mid/_queue 同步进 STATE(带歌名/歌手,供手机显示)。"""
+    STATE["now"] = ({"mid": _now_mid, **(library.song_meta(_now_mid) or {})}
+                    if _now_mid else None)
+    STATE["queue"] = [{"mid": m, **(library.song_meta(m) or {})} for m in _queue]
+
+
+def k_advance_paused():
+    """自然唱完时调用:把下一首装载到**开头并保持暂停**(等主播手动开唱),队空则清空当前曲。
+    这样歌曲间歇 BGM 能顶上——手机端"演唱↔BGM 联动"看到演唱停止,会自动恢复它暂停过的 QQ音乐;
+    主播按播放开唱下一首时,联动又会把 BGM 渐弱暂停。"""
+    global _now_mid
+    if _queue:
+        _now_mid = _queue.pop(0)
+        _player_send("load " + _now_mid)   # load 自带:归位到 0、清调、切回伴奏、暂停
+    else:
+        _now_mid = None
+        _player_send("pause")
+    _sync_queue_state()
+
+
+def k_play_next():
+    """播放队列下一首(队空则空闲暂停)。静默切歌:不发 show,
+    窗口显隐维持原状,由用户经托盘/遥控手动控制。"""
+    global _now_mid
+    if _queue:
+        _now_mid = _queue.pop(0)
+        _player_send("load " + _now_mid)
+        _player_send("play")
+    else:
+        _now_mid = None
+        _player_send("pause")
+    _sync_queue_state()
+
+
+def k_enqueue(mid):
+    """点歌:入队;若当前空闲则立即开唱。"""
+    if not mid:
+        return
+    _queue.append(mid)
+    if _now_mid is None:
+        k_play_next()
+    else:
+        _sync_queue_state()
+
+
+def k_remove(idx):
+    if 0 <= idx < len(_queue):
+        _queue.pop(idx)
+    _sync_queue_state()
+
+
+def k_clear():
+    _queue.clear()
+    _sync_queue_state()
+
+
+def k_move(frm, to):
+    """队列重排:把第 frm 首移到第 to 位(手机长按拖动 / 置顶)。"""
+    if 0 <= frm < len(_queue) and 0 <= to < len(_queue) and frm != to:
+        _queue.insert(to, _queue.pop(frm))
+    _sync_queue_state()
+
+
 def run_tray(url):
+    global _tray_icon, _tray_thread_id
+    _tray_thread_id = threading.get_ident()   # 记录托盘线程,refresh_tray 只在此线程改菜单
     import pystray
     from PIL import Image, ImageDraw
 
@@ -519,23 +1041,91 @@ def run_tray(url):
         d.rectangle((2, 2, 14, 14), fill="red")
         d.rectangle((4, 4, 12, 12), fill="white")
 
-    def do_quit(icon, item):
+    def _really_quit(icon):
         icon.stop()
-        if _smtc_proc is not None:
+        for p in (_smtc_proc, _player_proc):     # 收尾两个子进程
             try:
-                _smtc_proc.terminate()
+                if p is not None:
+                    p.terminate()
             except Exception:
                 pass
         os._exit(0)
 
+    def do_quit(icon, item):
+        # 退出前弹窗确认,防误点(托盘一停,服务、子进程全收尾,不可逆)。
+        # 关键:弹窗必须在独立线程弹——直接在托盘菜单回调里 MessageBox 会占住
+        # pystray 的 Win32 消息泵,导致弹窗按钮点了没反应、整个托盘卡死。
+        def _confirm():
+            try:
+                import ctypes
+                MB_YESNO, MB_ICONQUESTION, MB_TOPMOST, IDYES = 0x4, 0x20, 0x40000, 6
+                answer = ctypes.windll.user32.MessageBoxW(
+                    0,
+                    "确定要退出直播遥控后台服务吗?\n退出后遥控、曲库监听、K歌播放器都会停止。",
+                    "直播遥控 · 退出确认",
+                    MB_YESNO | MB_ICONQUESTION | MB_TOPMOST,
+                )
+                if answer != IDYES:
+                    return
+            except Exception:
+                pass   # 弹窗失败(非 Windows/无 GUI)时按老行为直接退出
+            _really_quit(icon)
+
+        threading.Thread(target=_confirm, daemon=True).start()
+
+    def on_toggle_karaoke(icon, item):
+        toggle_player()
+
+    def on_rename_pending(icon, item):
+        pend = library.pending_rename()
+        if pend:
+            _open_rename_dialog(pend[0])   # 打开第一首待命名的改名框
+
+    # 菜单项文本用可调用;但 pystray-win32 右键弹的是缓存菜单、**不会**在打开时重新求值,
+    # 需靠 refresh_tray()→update_menu() 主动刷(见 refresh_tray 注释)。
     menu = pystray.Menu(
         pystray.MenuItem(f"遥控地址: {url}", None, enabled=False),
         pystray.MenuItem(
-            f"Studio One MIDI: {'已连接' if STATE['studio_connected'] else '未连接'}",
+            lambda i: f"Studio One MIDI: {'已连接' if STATE['studio_connected'] else '未连接'}",
             None, enabled=False),
+        pystray.MenuItem(lambda i: f"曲库: {STATE['lib_count']} 首", None, enabled=False),
+        pystray.MenuItem(
+            lambda i: f"监听: {'运行中' if STATE['watcher_running'] else '已停'}",
+            None, enabled=False),
+        # 待命名(歌名提不准的歌):仅有待命名时显示,点开弹改名框
+        pystray.MenuItem(
+            lambda i: f"✎ 待命名 ({len(library.pending_rename())}) — 点此改名",
+            on_rename_pending,
+            visible=lambda i: bool(library.pending_rename())),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem(
+            "K歌歌词", on_toggle_karaoke,
+            checked=lambda i: STATE["player_visible"]),   # 用权威状态(player 经VIS上报),不重读win32免竞态
         pystray.MenuItem("退出", do_quit),
     )
-    pystray.Icon("live_remote", image, "直播遥控 · 后台服务", menu).run()
+    _tray_icon = pystray.Icon("live_remote", image, "直播遥控 · 后台服务", menu)
+
+    # 注册自定义窗口消息处理(经 _dispatcher 在托盘线程分发,update_menu 在此线程调安全):
+    # ① WM_TRAY_REFRESH:非托盘线程 PostMessage 来唤醒托盘线程 update_menu(曲库数/勾选刷新);
+    # ② 包裹托盘回调 WM_NOTIFY(=WM_USER+11):点气泡通知(NIN_BALLOONUSERCLICK)→ 弹改名框,
+    #    其它 lParam(左键/右键点图标)照旧交回原处理。
+    _orig_on_notify = _tray_icon._on_notify
+
+    def _on_tray_notify(wparam, lparam):
+        if lparam == NIN_BALLOONUSERCLICK:
+            _open_rename_dialog(_last_needs_name_mid)
+            return 0
+        return _orig_on_notify(wparam, lparam)
+
+    _tray_icon._message_handlers[WM_TRAY_REFRESH] = lambda w, l: _tray_icon.update_menu()
+    _tray_icon._message_handlers[0x400 + 11] = _on_tray_notify   # WM_NOTIFY(pystray 托盘回调)
+
+    def _tray_setup(icon):
+        global _tray_hwnd
+        icon.visible = True                       # 自定义 setup 须自己置可见
+        _tray_hwnd = getattr(icon, "_hwnd", None)  # loop 已起,_hwnd 已建
+
+    _tray_icon.run(setup=_tray_setup)
 
 
 def _port_in_use(port):
@@ -561,12 +1151,15 @@ def main():
             pass
         return
 
+    _restore_persist()   # 先恢复上次的场景/静音记录/演唱音量,再起各子系统
     STATE["studio_connected"] = open_midi()
     # 说明:Studio One 的 Mackie 不回传静音状态,故不用回读,改为"纯记录 + 归位"。
     # 注意:不要在主线程调 get_qq_volume()——pycaw 的 COM 会和主线程托盘冲突导致崩溃。
     # bgm_vol 由后台轮询线程(_bgm_poller)首次读取,见下。
 
     start_smtc_reader()   # winrt 子进程(歌名/进度),与主进程 COM 隔离
+    library.start(STATE, _on_lib_change, _on_lib_import)  # 曲库监听(WeSing缓存→永久曲库,入库弹通知)
+    start_player()        # 拉起 K歌播放器子进程(隐藏+暂停)
 
     ip = get_lan_ip()
     url = f"http://{ip}:{config.PORT}"
@@ -577,6 +1170,20 @@ def main():
     print("  已在右下角托盘常驻。看完地址可直接关掉本窗口,")
     print("  服务不受影响;要停服务请右键托盘图标→退出。")
     print("=" * 50)
+
+    # --headless:无托盘,uvicorn 跑主线程阻塞。供无界面/自动化测试(pystray 需交互桌面,
+    # 分离进程里 icon.run() 会立即返回致主线程结束、服务随之退出;headless 绕开)。
+    headless = "--headless" in sys.argv
+    if headless:
+        # 服务器仍跑后台线程(与正常路径一致,避免主线程 uvicorn 与 COM/pycaw 冲突段错误),
+        # 主线程仅阻塞等待(替代托盘)。供无界面/自动化测试。
+        print("[headless] 无托盘模式,服务后台线程运行(Ctrl+C 退出)", flush=True)
+        threading.Thread(target=run_server, daemon=True).start()
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            pass
+        return
 
     # 脱离控制台:关掉黑窗口不会杀掉服务(托盘继续挂着,只能从托盘退出)。
     # banner 已打印可见;之后的输出转入 server.log。

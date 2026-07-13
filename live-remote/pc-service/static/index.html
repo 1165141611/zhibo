@@ -43,8 +43,6 @@
   <div class="bar">
     <div class="row">
       <span class="dot" id="dot" title="后端连接状态"></span>
-      <span class="dot" id="scrcpyDot" title="投屏状态(点一下重试)"
-            onclick="ensureScrcpy()"></span>
       <div class="scenes" id="scenes"></div>
     </div>
 
@@ -89,7 +87,7 @@ SCENES.forEach(s => {
 let ws, curScene = null;
 function connect() {
   ws = new WebSocket("ws://" + location.host + "/ws");
-  ws.onopen = () => { setConn(true); ensureScrcpy(); };   // 进入悬浮态即请求投屏
+  ws.onopen = () => setConn(true);
   ws.onclose = () => { setConn(false); setTimeout(connect, 1500); };
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
@@ -134,8 +132,6 @@ resetBtn.addEventListener("touchcancel", holdCancel);
 resetBtn.addEventListener("mousedown", holdStart);
 resetBtn.addEventListener("mouseup", holdCancel);
 resetBtn.addEventListener("mouseleave", holdCancel);
-// 让 PC 检测/自动拉起 scrcpy 无线投屏(不带声音)
-function ensureScrcpy(){ send({cmd:"ensure_scrcpy"}); }
 function volLabel(v){ document.getElementById("volval").textContent = v; }
 
 // BGM 进度(只读,本地按秒插值让进度条平滑)
@@ -172,12 +168,6 @@ function applyState(m){
   if (m.studio_visible !== undefined){
     document.getElementById("studioBtn").textContent =
       m.studio_visible ? "隐藏 Studio" : "显示 Studio";
-  }
-  if (m.scrcpy_ok !== undefined){
-    document.getElementById("scrcpyDot").classList.toggle("on", !!m.scrcpy_ok);
-  }
-  if (m.scrcpy_msg){
-    document.getElementById("scrcpyDot").title = "投屏:" + m.scrcpy_msg + "(点一下重试)";
   }
 }
 connect();

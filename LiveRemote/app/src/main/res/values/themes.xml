@@ -1,9 +1,10 @@
-<resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
-    <style name="Base.Theme.LiveRemote" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <!-- <item name="colorPrimary">@color/my_light_primary</item> -->
+<resources>
+    <!-- 纯 Compose 应用:用平台深色主题当窗口壳,避免依赖 material 视图库;
+         始终深色(主播暗光环境),窗口背景设成设计底色防白闪。 -->
+    <style name="Theme.LiveRemote" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0E0F13</item>
+        <item name="android:statusBarColor">#0E0F13</item>
+        <item name="android:navigationBarColor">#14171F</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
-
-    <style name="Theme.LiveRemote" parent="Base.Theme.LiveRemote" />
 </resources>

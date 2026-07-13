@@ -3,7 +3,8 @@
 - 升降调:改 semitones 即秒切(延迟≈队列深度~0.2s)
 - 变调核心:stftpitchshift 逐块处理 + 块间交叉淡化(消除相位不连续)
 - semitones=0 时直通原始音频(最干净)
-- 时钟:heard_frame = base + 已输出帧数(与所听内容对齐)
+- 时钟:heard_frame = base + 已输出帧数 - 设备缓冲延迟(与所听内容对齐)
+- 设备缓冲给足 ~120ms:回调是 Python 函数会被 GUI 抢 GIL 拖延,缓冲薄了会欠载吱吱声
 """
 import threading
 import queue
@@ -24,6 +25,7 @@ class AudioEngine:
         self.semitones = 0
         self.playing = False
         self.xruns = 0
+        self._vol = 1.0           # 输出音量增益 0..1(手机音量键同步伴奏音量);换歌不重置
 
         self._lock = threading.Lock()
         self._q = queue.Queue(maxsize=6)
@@ -39,11 +41,17 @@ class AudioEngine:
         self._producer.start()
 
         self.stream = None
+        self._lat_frames = 0      # 设备缓冲延迟(帧),current_ms 用于显示时钟补偿
         if start_stream:
+            # latency 给足(实测约180ms):回调是 Python 函数,GUI 会抢 GIL 拖它——
+            # 窗口每次 show 的首帧曝光要 ~150ms,换行建字缓存 10~35ms;缓冲太薄
+            # (WASAPI "high"≈46ms)就会欠载=断续吱吱声。代价是切调/seek 多 ~0.15s
+            # 才被听到,可接受;显示时钟已用 _lat_frames 补偿,歌词不会提前。
             self.stream = sd.OutputStream(
                 samplerate=SR, channels=2, dtype="float32",
-                device=device, blocksize=1024, latency="high", callback=self._cb)
+                device=device, blocksize=1024, latency=0.16, callback=self._cb)
             self.stream.start()
+            self._lat_frames = int(self.stream.latency * SR)
             dev = sd.query_devices(self.stream.device)["name"]
             print("音频输出 →", dev, "| 延迟 %.0fms" % (self.stream.latency * 1000))
 
@@ -142,7 +150,7 @@ class AudioEngine:
                 buf = np.concatenate([buf, chunk], axis=0) if len(buf) else chunk
             take = min(frames, len(buf))
             if take:
-                outdata[:take] = buf[:take]
+                outdata[:take] = buf[:take] * self._vol
             if take < frames:
                 outdata[take:] = 0
             self._pending = buf[take:]
@@ -166,11 +174,46 @@ class AudioEngine:
                 self._reset_to(0)
             self.playing = not self.playing
 
+    def set_playing(self, playing):
+        """绝对设置播放/暂停(供 IPC play/pause)。"""
+        with self._lock:
+            if playing and self._base + self._out >= len(self.source):
+                self._reset_to(0)
+            self.playing = bool(playing)
+
+    def is_playing(self):
+        return self.playing
+
+    def set_volume(self, pct):
+        """设输出音量(0-100,线性增益)。float 赋值原子,无需锁;回调下一块即生效。"""
+        self._vol = max(0, min(100, int(pct))) / 100.0
+
+    @property
+    def volume_pct(self):
+        return int(round(self._vol * 100))
+
     def seek_ms(self, delta_ms):
         with self._lock:
             cur = self._base + self._out
             tgt = int(np.clip(cur + delta_ms * SR / 1000, 0, len(self.source)))
             self._reset_to(tgt)
+
+    def seek_to_ms(self, ms):
+        """绝对定位(供 IPC seek)。"""
+        with self._lock:
+            tgt = int(np.clip(ms * SR / 1000, 0, len(self.source)))
+            self._reset_to(tgt)
+
+    def load(self, source):
+        """载入新歌:换源、归位到 0、清调、暂停。"""
+        with self._lock:
+            self.source = np.ascontiguousarray(source, np.float32)
+            self.semitones = 0
+            self.playing = False
+            self._reset_to(0)
+
+    def duration_ms(self):
+        return len(self.source) / SR * 1000
 
     def swap_buffer(self, new_buf):
         with self._lock:
@@ -193,8 +236,10 @@ class AudioEngine:
             pass
 
     def current_ms(self):
+        """所听位置(ms):已提交给声卡的帧数减去设备缓冲延迟,与耳朵对齐
+        (缓冲加大到 ~120ms 后不补偿的话,歌词高亮会明显提前于人声)。"""
         with self._lock:
-            return (self._base + self._out) / SR * 1000
+            return max(0, self._base + self._out - self._lat_frames) / SR * 1000
 
     def close(self):
         self._run = False

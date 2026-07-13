@@ -11,3 +11,6 @@ kshift_*.f32
 
 # 说明:wesing_pcm_key.py 是必需的密钥,不忽略;
 # 大内存 dump / 试听 wav / 变调临时文件都是可再生的调试产物。
+
+*.png
+song_data.json

@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#07080b;font-family:'Noto Sans SC',system-ui,sans-serif}
+a{color:#45D6FF;text-decoration:none}a:hover{color:#7fe3ff}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes reglow{0%,100%{opacity:.55}50%{opacity:1}}
+@keyframes sheetup{from{transform:translateY(100%)}to{transform:translateY(0)}}
+@keyframes fabpulse{0%,100%{box-shadow:0 0 0 0 rgba(69,214,255,.4)}50%{box-shadow:0 0 0 7px rgba(69,214,255,0)}}
+input[type=range]{accent-color:#45D6FF}
+input,button{font-family:inherit}
+.kx::-webkit-scrollbar{width:0;height:0}
+</style>
+</helmet>
+<div style="min-height:100%;display:flex;align-items:center;justify-content:center;padding:24px;background:radial-gradient(120% 90% at 50% 0%, #14161d 0%, #07080b 70%)">
+<x-import component-from-global-scope="AndroidDevice" from="./android-frame.jsx" dark="{{ T }}" width="{{ devW }}" height="{{ devH }}" hint-size="412px,900px">
+
+<div style="height:100%;display:flex;flex-direction:column;background:#0E0F13;color:#F2F4F8;position:relative;overflow:hidden;font-family:'Noto Sans SC',system-ui,sans-serif">
+
+  <sc-if value="{{ disconnected }}" hint-placeholder-val="{{ F }}">
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:8px 12px;background:#3a1f22;color:#ffb9a0;font-size:13px;font-weight:500;flex:none">
+      <div style="width:13px;height:13px;border:2px solid rgba(255,185,160,.35);border-top-color:#ffb9a0;border-radius:50%;animation:spin .8s linear infinite"></div>
+      与电脑断开,重连中…
+    </div>
+  </sc-if>
+
+  <div class="kx" style="flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;position:relative">
+
+    <!-- ══════════ 屏1 演唱 ══════════ -->
+    <sc-if value="{{ isSing }}" hint-placeholder-val="{{ T }}">
+      <div style="height:100%;display:flex;flex-direction:column">
+
+        <sc-if value="{{ hasSong }}" hint-placeholder-val="{{ T }}">
+          <div style="height:100%;display:flex;flex-direction:column;position:relative">
+
+            <div style="padding:14px 16px 12px;flex:none">
+              <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+                <div style="min-width:0">
+                  <div style="font-size:20px;font-weight:700;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ np.title }}</div>
+                  <div style="font-size:13px;color:#8A90A0;margin-top:3px">{{ np.artist }}</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;flex:none">
+                  <div onClick="{{ openSettings }}" title="连接设置" style="width:11px;height:11px;border-radius:50%;cursor:pointer;background:{{ connDotColor }};box-shadow:0 0 8px {{ connDotColor }}"></div>
+                  <div style="padding:5px 11px;border-radius:9px;background:#1C1F27;border:1px solid #2a2e39;font-size:12px;font-weight:700;color:#45D6FF;white-space:nowrap">{{ keyLabel }}</div>
+                  <div style="padding:5px 11px;border-radius:9px;background:#1C1F27;border:1px solid #2a2e39;font-size:12px;font-weight:500;color:#F2F4F8;white-space:nowrap">{{ source }}</div>
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:9px;margin-top:11px">
+                <span style="font-size:11px;color:#45D6FF;font-variant-numeric:tabular-nums;min-width:30px">{{ elapsedStr }}</span>
+                <div style="flex:1;height:4px;border-radius:2px;background:#23262f;overflow:hidden">
+                  <div style="height:100%;background:#45D6FF;border-radius:2px;width:{{ progressPct }}"></div>
+                </div>
+                <span style="font-size:11px;color:#8A90A0;font-variant-numeric:tabular-nums;min-width:30px;text-align:right">{{ totalStr }}</span>
+              </div>
+            </div>
+
+            <div style="position:relative;height:172px;flex:none;background:linear-gradient(180deg,#101219 0%,#0c0d12 100%);border-top:1px solid #191c24;border-bottom:1px solid #191c24;overflow:hidden">
+              <div style="position:absolute;left:0;right:0;top:33%;height:1px;background:rgba(255,255,255,.04)"></div>
+              <div style="position:absolute;left:0;right:0;top:66%;height:1px;background:rgba(255,255,255,.04)"></div>
+              <sc-for list="{{ notes }}" as="n" hint-placeholder-count="7">
+                <div style="{{ n.style }}"><div style="{{ n.fillStyle }}"></div></div>
+              </sc-for>
+              <div style="position:absolute;left:96px;top:0;bottom:0;width:2px;background:#45D6FF;box-shadow:0 0 12px rgba(69,214,255,.9)"></div>
+              <div style="position:absolute;left:90px;top:6px;width:14px;height:14px;border-radius:50%;background:#45D6FF;box-shadow:0 0 12px rgba(69,214,255,.9)"></div>
+              <sc-if value="{{ showSongLabel }}" hint-placeholder-val="{{ F }}">
+                <div style="position:absolute;left:0;right:0;bottom:12px;text-align:center;font-size:13px;color:#6b7180;letter-spacing:1px">♪ {{ np.title }} - {{ np.artist }}</div>
+              </sc-if>
+            </div>
+
+            <div style="flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px 20px;gap:16px">
+              <sc-if value="{{ showDots }}" hint-placeholder-val="{{ F }}">
+                <div style="display:flex;gap:12px;align-items:center;margin-bottom:2px">
+                  <sc-for list="{{ dots }}" as="d" hint-placeholder-count="4">
+                    <div style="{{ d.style }}"></div>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <div style="display:flex;flex-wrap:wrap;justify-content:center;font-size:30px;font-weight:700;line-height:1.3;letter-spacing:1px;text-align:center">
+                <sc-for list="{{ curChars }}" as="c" hint-placeholder-count="10">
+                  <span style="{{ c.style }}">{{ c.ch }}</span>
+                </sc-for>
+              </div>
+              <div style="font-size:17px;color:#8A90A0;text-align:center;text-wrap:pretty">{{ nextLine }}</div>
+            </div>
+
+            <!-- 控制条 -->
+            <div style="flex:none;padding:10px 14px 14px;border-top:1px solid #191c24;background:#0d0e13">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:9px">
+                <span style="font-size:10px;color:#6b7180;font-weight:700;flex:none;letter-spacing:.5px">声卡</span>
+                <div style="display:flex;gap:5px;flex:1">
+                  <sc-for list="{{ scenesMini }}" as="sc" hint-placeholder-count="5">
+                    <div onClick="{{ sc.onTap }}" style="{{ sc.miniStyle }}">{{ sc.name }}</div>
+                  </sc-for>
+                </div>
+              </div>
+              <div style="text-align:center;font-size:12px;color:#8A90A0;margin-bottom:9px">{{ nextPreview }}</div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+                <div style="display:flex;align-items:center;background:#1C1F27;border:1px solid #2a2e39;border-radius:13px;overflow:hidden;flex:none">
+                  <div onClick="{{ keyDown }}" style="width:34px;height:50px;display:flex;align-items:center;justify-content:center;font-size:22px;color:#F2F4F8;cursor:pointer">−</div>
+                  <div style="min-width:38px;text-align:center;font-size:13px;font-weight:700;color:#45D6FF">{{ keyLabel }}</div>
+                  <div onClick="{{ keyUp }}" style="width:34px;height:50px;display:flex;align-items:center;justify-content:center;font-size:20px;color:#F2F4F8;cursor:pointer">+</div>
+                </div>
+                <div onClick="{{ seekBack }}" title="步退" style="width:48px;height:48px;border-radius:50%;flex:none;background:#1C1F27;border:1px solid #2a2e39;display:flex;align-items:center;justify-content:center;cursor:pointer">
+                  <svg width="23" height="23" viewBox="0 0 24 24" fill="#F2F4F8"><path d="M11 5v14l-8-7z"/><path d="M20 5v14l-8-7z"/></svg>
+                </div>
+                <div onClick="{{ togglePlay }}" style="width:60px;height:60px;border-radius:50%;flex:none;background:#45D6FF;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 6px 22px rgba(69,214,255,.4)">
+                  <sc-if value="{{ playing }}" hint-placeholder-val="{{ T }}">
+                    <svg width="25" height="25" viewBox="0 0 24 24" fill="#07080b"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+                  </sc-if>
+                  <sc-if value="{{ paused }}" hint-placeholder-val="{{ F }}">
+                    <svg width="27" height="27" viewBox="0 0 24 24" fill="#07080b"><path d="M8 5v14l11-7z"/></svg>
+                  </sc-if>
+                </div>
+                <div onClick="{{ seekFwd }}" title="步进" style="width:48px;height:48px;border-radius:50%;flex:none;background:#1C1F27;border:1px solid #2a2e39;display:flex;align-items:center;justify-content:center;cursor:pointer">
+                  <svg width="23" height="23" viewBox="0 0 24 24" fill="#F2F4F8"><path d="M13 5v14l8-7z"/><path d="M4 5v14l8-7z"/></svg>
+                </div>
+                <div onClick="{{ toggleSource }}" style="height:50px;padding:0 9px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#1C1F27;border:1px solid #2a2e39;border-radius:13px;cursor:pointer;line-height:1;flex:none">
+                  <span style="font-size:9px;color:#8A90A0;margin-bottom:3px">音源</span>
+                  <span style="font-size:14px;font-weight:700;color:#F2F4F8">{{ source }}</span>
+                </div>
+              </div>
+            </div>
+
+            <sc-if value="{{ loading }}" hint-placeholder-val="{{ F }}">
+              <div style="position:absolute;inset:0;background:rgba(8,9,12,.72);backdrop-filter:blur(2px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:5">
+                <div style="width:44px;height:44px;border:3px solid rgba(69,214,255,.25);border-top-color:#45D6FF;border-radius:50%;animation:spin .8s linear infinite"></div>
+                <div style="font-size:14px;color:#8A90A0">歌曲加载中…</div>
+              </div>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ noSong }}" hint-placeholder-val="{{ F }}">
+          <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;text-align:center;gap:14px">
+            <div style="width:76px;height:76px;border-radius:50%;background:#14161d;border:1px solid #23262f;display:flex;align-items:center;justify-content:center;margin-bottom:6px">
+              <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#45D6FF" stroke-width="1.7" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v4M8 21h8"/></svg>
+            </div>
+            <div style="font-size:26px;font-weight:700">还没开始唱</div>
+            <div style="font-size:14px;color:#8A90A0;line-height:1.6;max-width:260px">去"点歌"选一首,或在电脑K歌里唱一首备货</div>
+            <div onClick="{{ goSearch }}" style="margin-top:8px;padding:13px 26px;border-radius:14px;background:#45D6FF;color:#07080b;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 6px 22px rgba(69,214,255,.35)">去点歌 →</div>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <!-- ══════════ 屏2 队列(含点歌入口) ══════════ -->
+    <sc-if value="{{ isQueue }}" hint-placeholder-val="{{ F }}">
+      <div style="padding:16px 16px 20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:9px">
+            <div style="font-size:22px;font-weight:700">队列</div>
+            <div onClick="{{ openSettings }}" style="width:11px;height:11px;border-radius:50%;cursor:pointer;background:{{ connDotColor }};box-shadow:0 0 8px {{ connDotColor }}"></div>
+          </div>
+          <div onClick="{{ clearQueue }}" style="font-size:13px;color:#8A90A0;cursor:pointer;padding:4px 4px">清空队列</div>
+        </div>
+
+        <sc-if value="{{ hasSong }}" hint-placeholder-val="{{ T }}">
+          <div style="border:1.5px solid #45D6FF;border-radius:16px;padding:14px 15px;margin-bottom:14px;background:linear-gradient(180deg,rgba(69,214,255,.10),rgba(69,214,255,.02))">
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+                  <span style="width:7px;height:7px;border-radius:50%;background:#FF9F45;box-shadow:0 0 6px #FF9F45;animation:reglow 1.4s ease-in-out infinite"></span>
+                  <span style="font-size:11px;font-weight:700;color:#FF9F45">演唱中</span>
+                </div>
+                <div style="font-size:17px;font-weight:700">{{ np.title }}</div>
+                <div style="font-size:13px;color:#8A90A0;margin-top:2px">{{ np.artist }}</div>
+                <div style="height:4px;border-radius:2px;background:rgba(255,255,255,.10);overflow:hidden;margin-top:10px">
+                  <div style="height:100%;background:#45D6FF;width:{{ progressPct }}"></div>
+                </div>
+              </div>
+              <div onClick="{{ skipNext }}" title="切下一首" style="width:46px;height:46px;border-radius:50%;flex:none;background:rgba(69,214,255,.15);border:1px solid rgba(69,214,255,.4);display:flex;align-items:center;justify-content:center;cursor:pointer">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="#45D6FF"><path d="M6 5v14l9-7z"/><path d="M15.5 5h2.4v14h-2.4z"/></svg>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+        <div onClick="{{ openPicker }}" style="display:flex;align-items:center;justify-content:center;gap:9px;padding:14px;border-radius:14px;border:1.5px dashed rgba(69,214,255,.5);background:rgba(69,214,255,.06);color:#45D6FF;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:18px">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#45D6FF" stroke-width="2.4" stroke-linecap="round"><path d="M12 6v12M6 12h12"/></svg>
+          点歌 · 从曲库加歌
+        </div>
+
+        <sc-if value="{{ queueFilled }}" hint-placeholder-val="{{ T }}">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin:0 2px 10px">
+            <span style="font-size:12px;color:#8A90A0;font-weight:700">等待队列 · {{ queueCount }}</span>
+            <span style="font-size:11px;color:#5b6070">长按 ≡ 拖动重排</span>
+          </div>
+          <sc-for list="{{ queueRows }}" as="q" hint-placeholder-count="3">
+            <div style="{{ q.slotStyle }}"><div style="{{ q.cardStyle }}">
+              <div onPointerDown="{{ q.handleDown }}" title="长按拖动" style="display:flex;align-items:center;justify-content:center;width:26px;height:44px;flex:none;cursor:grab;touch-action:none;color:#4a4f5c">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 8h.01M8 12h.01M8 16h.01M15 8h.01M15 12h.01M15 16h.01"/></svg>
+              </div>
+              <span style="width:18px;text-align:center;font-size:14px;font-weight:700;color:#6b7180;font-variant-numeric:tabular-nums;flex:none">{{ q.idx }}</span>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:16px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ q.title }}</div>
+                <div style="font-size:13px;color:#8A90A0;margin-top:2px">{{ q.artist }}</div>
+              </div>
+              <div onClick="{{ q.onTop }}" title="置顶/下一首" style="width:38px;height:38px;border-radius:10px;background:#22262f;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#45D6FF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V6M6 12l6-6 6 6"/></svg>
+              </div>
+              <div onClick="{{ q.onDel }}" title="删除" style="width:38px;height:38px;border-radius:10px;background:#22262f;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8A90A0" stroke-width="2.1" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+              </div>
+            </div></div>
+          </sc-for>
+        </sc-if>
+
+        <sc-if value="{{ queueEmpty }}" hint-placeholder-val="{{ F }}">
+          <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 32px;text-align:center;gap:12px">
+            <div style="font-size:20px;font-weight:700">队列空了</div>
+            <div style="font-size:14px;color:#8A90A0;max-width:240px;line-height:1.6">用上面的"点歌"把想唱的排上</div>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <!-- ══════════ 屏3 遥控 ══════════ -->
+    <sc-if value="{{ isRemote }}" hint-placeholder-val="{{ F }}">
+      <div style="padding:16px 16px 22px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+          <div style="font-size:22px;font-weight:700">遥控</div>
+          <div onClick="{{ openSettings }}" style="display:flex;align-items:center;gap:7px;cursor:pointer;padding:5px 10px;border-radius:20px;background:#1C1F27;border:1px solid #2a2e39">
+            <span style="width:9px;height:9px;border-radius:50%;background:{{ connDotColor }};box-shadow:0 0 6px {{ connDotColor }}"></span>
+            <span style="font-size:12px;color:#8A90A0">{{ connText }}</span>
+          </div>
+        </div>
+
+        <div style="font-size:12px;color:#8A90A0;font-weight:700;margin:0 0 12px">声卡场景</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+          <sc-for list="{{ scenes }}" as="sc" hint-placeholder-count="5">
+            <div onClick="{{ sc.onTap }}" style="{{ sc.style }}">{{ sc.name }}</div>
+          </sc-for>
+        </div>
+        <div onClick="{{ resetScene }}" style="margin-top:12px;text-align:center;padding:12px;border-radius:13px;background:#1C1F27;border:1px solid #2a2e39;font-size:14px;color:#8A90A0;cursor:pointer">归位 <span style="font-size:11px;opacity:.7">（长按确认）</span></div>
+
+        <div style="font-size:12px;color:#8A90A0;font-weight:700;margin:22px 0 12px">背景音乐 · QQ音乐</div>
+        <div style="background:#1C1F27;border:1px solid #23262f;border-radius:16px;padding:16px 15px">
+          <div style="display:flex;align-items:center;justify-content:center;gap:22px">
+            <div onClick="{{ bgmPrev }}" style="width:46px;height:46px;border-radius:50%;background:#22262f;display:flex;align-items:center;justify-content:center;cursor:pointer">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="#F2F4F8"><path d="M18 5v14l-9-7z"/><path d="M6.1 5H8.5v14H6.1z"/></svg>
+            </div>
+            <div onClick="{{ bgmToggle }}" style="width:58px;height:58px;border-radius:50%;background:#45D6FF;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 5px 18px rgba(69,214,255,.35)">
+              <sc-if value="{{ bgmPlaying }}" hint-placeholder-val="{{ T }}"><svg width="24" height="24" viewBox="0 0 24 24" fill="#07080b"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg></sc-if>
+              <sc-if value="{{ bgmPaused }}" hint-placeholder-val="{{ F }}"><svg width="26" height="26" viewBox="0 0 24 24" fill="#07080b"><path d="M8 5v14l11-7z"/></svg></sc-if>
+            </div>
+            <div onClick="{{ bgmNext }}" style="width:46px;height:46px;border-radius:50%;background:#22262f;display:flex;align-items:center;justify-content:center;cursor:pointer">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="#F2F4F8"><path d="M6 5v14l9-7z"/><path d="M15.5 5h2.4v14h-2.4z"/></svg>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;margin-top:16px">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8A90A0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg>
+            <input type="range" min="0" max="100" value="{{ volume }}" onInput="{{ onVol }}" style="flex:1;height:4px"/>
+            <span style="font-size:13px;color:#F2F4F8;font-weight:700;min-width:30px;text-align:right;font-variant-numeric:tabular-nums">{{ volume }}</span>
+          </div>
+          <div style="font-size:12px;color:#6b7180;margin-top:12px;text-align:center">{{ bgmNow }}</div>
+        </div>
+
+        <div style="font-size:12px;color:#8A90A0;font-weight:700;margin:22px 0 12px">窗口开关</div>
+        <div style="background:#1C1F27;border:1px solid #23262f;border-radius:16px;overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:15px;border-bottom:1px solid #23262f">
+            <span style="font-size:15px">Studio One 显示/隐藏</span>
+            <div onClick="{{ toggleSO }}" style="{{ soTrack }}"><div style="{{ soKnob }}"></div></div>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:15px">
+            <span style="font-size:15px">K歌歌词 显示/隐藏</span>
+            <div onClick="{{ toggleLY }}" style="{{ lyTrack }}"><div style="{{ lyKnob }}"></div></div>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+  </div>
+
+  <!-- 悬浮 QQ音乐 迷你控制台 -->
+  <sc-if value="{{ showBgmFab }}" hint-placeholder-val="{{ F }}">
+    <sc-if value="{{ bgmClosed }}" hint-placeholder-val="{{ T }}">
+      <div style="{{ fabPos }}">
+        <div onPointerDown="{{ fabDown }}" title="QQ音乐 · 拖动移动 / 点击展开" style="{{ fabStyle }}">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#45D6FF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>
+          <div style="{{ fabBadge }}"></div>
+        </div>
+      </div>
+    </sc-if>
+    <sc-if value="{{ bgmOpen }}" hint-placeholder-val="{{ F }}">
+      <div onClick="{{ collapseBgm }}" style="position:absolute;inset:0;z-index:15"></div>
+      <div style="position:absolute;right:14px;bottom:78px;z-index:16">
+        <div style="width:260px;background:rgba(16,18,25,.86);backdrop-filter:blur(12px);border:1px solid rgba(69,214,255,.28);border-radius:18px;padding:13px 14px;box-shadow:0 14px 40px rgba(0,0,0,.55)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px">
+            <div style="display:flex;align-items:center;gap:7px">
+              <span style="width:6px;height:6px;border-radius:50%;background:#45D6FF;box-shadow:0 0 6px #45D6FF"></span>
+              <span style="font-size:12px;font-weight:700;color:#45D6FF">QQ音乐 · 背景音乐</span>
+            </div>
+            <div onClick="{{ toggleBgm }}" style="width:26px;height:26px;border-radius:8px;background:rgba(255,255,255,.06);display:flex;align-items:center;justify-content:center;cursor:pointer">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8A90A0" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </div>
+          </div>
+          <div style="font-size:12px;color:#c3c8d2;margin-bottom:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ bgmNow }}</div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:18px;margin-bottom:11px">
+            <div onClick="{{ bgmPrev }}" style="width:38px;height:38px;border-radius:50%;background:rgba(255,255,255,.07);display:flex;align-items:center;justify-content:center;cursor:pointer">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="#F2F4F8"><path d="M18 5v14l-9-7z"/><path d="M6.1 5H8.5v14H6.1z"/></svg>
+            </div>
+            <div onClick="{{ bgmToggle }}" style="width:48px;height:48px;border-radius:50%;background:#45D6FF;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 14px rgba(69,214,255,.4)">
+              <sc-if value="{{ bgmPlaying }}" hint-placeholder-val="{{ T }}"><svg width="20" height="20" viewBox="0 0 24 24" fill="#07080b"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg></sc-if>
+              <sc-if value="{{ bgmPaused }}" hint-placeholder-val="{{ F }}"><svg width="22" height="22" viewBox="0 0 24 24" fill="#07080b"><path d="M8 5v14l11-7z"/></svg></sc-if>
+            </div>
+            <div onClick="{{ bgmNext }}" style="width:38px;height:38px;border-radius:50%;background:rgba(255,255,255,.07);display:flex;align-items:center;justify-content:center;cursor:pointer">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="#F2F4F8"><path d="M6 5v14l9-7z"/><path d="M15.5 5h2.4v14h-2.4z"/></svg>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8A90A0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg>
+            <input type="range" min="0" max="100" value="{{ volume }}" onInput="{{ onVol }}" style="flex:1;height:4px"/>
+            <span style="font-size:12px;color:#F2F4F8;font-weight:700;min-width:26px;text-align:right;font-variant-numeric:tabular-nums">{{ volume }}</span>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+  </sc-if>
+
+  <!-- TabBar -->
+  <div style="flex:none;display:flex;background:#14171f;border-top:1px solid #262a34;padding:7px 4px 4px">
+    <div onClick="{{ onSing }}" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px 0;cursor:pointer;color:{{ singColor }}">
+      <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3" fill="currentColor" stroke="none"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21M8.5 21h7"/></svg>
+      <span style="font-size:11px;font-weight:{{ singWeight }}">演唱</span>
+    </div>
+    <div onClick="{{ onQueue }}" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px 0;cursor:pointer;color:{{ queueColor }}">
+      <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11M4 11h11M4 16h6"/><path d="M16 13.2v6.3l5-3.15z" fill="currentColor" stroke="none"/></svg>
+      <span style="font-size:11px;font-weight:{{ queueWeight }}">队列</span>
+    </div>
+    <div onClick="{{ onRemote }}" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px 0;cursor:pointer;color:{{ remoteColor }}">
+      <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="6.5" y="2.5" width="11" height="19" rx="4"/><circle cx="12" cy="7" r="1.6" fill="currentColor" stroke="none"/><path d="M9.5 12h5M9.5 15.5h5"/></svg>
+      <span style="font-size:11px;font-weight:{{ remoteWeight }}">遥控</span>
+    </div>
+  </div>
+
+  <!-- 点歌 底部弹层 -->
+  <sc-if value="{{ pickerOpen }}" hint-placeholder-val="{{ F }}">
+    <div style="position:absolute;inset:0;z-index:25;display:flex;flex-direction:column;justify-content:flex-end">
+      <div onClick="{{ closePicker }}" style="position:absolute;inset:0;background:rgba(0,0,0,.55)"></div>
+      <div style="position:relative;background:#101219;border-top-left-radius:22px;border-top-right-radius:22px;max-height:84%;display:flex;flex-direction:column;box-shadow:0 -12px 44px rgba(0,0,0,.6);animation:sheetup .24s ease">
+        <div style="display:flex;justify-content:center;padding:10px 0 2px"><div style="width:40px;height:4px;border-radius:2px;background:#3a3f4c"></div></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 16px 12px">
+          <div style="font-size:20px;font-weight:700">点歌</div>
+          <div onClick="{{ closePicker }}" style="width:36px;height:36px;border-radius:50%;background:#1C1F27;display:flex;align-items:center;justify-content:center;cursor:pointer">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F2F4F8" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </div>
+        </div>
+        <div style="padding:0 16px 12px;flex:none">
+          <div style="display:flex;align-items:center;gap:10px;background:#1C1F27;border:1px solid #2a2e39;border-radius:14px;padding:12px 14px">
+            <input placeholder="搜歌名或歌手…" style="flex:1;background:transparent;border:none;outline:none;color:#F2F4F8;font-size:15px"/>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8A90A0" stroke-width="1.9" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.4-4.4"/></svg>
+          </div>
+        </div>
+        <div class="kx" style="flex:1;min-height:0;overflow-y:auto;padding:0 16px 22px">
+          <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#8A90A0;font-weight:700;margin:4px 0 10px">最近入库<span style="font-size:10px;color:#45D6FF;background:rgba(69,214,255,.12);padding:2px 7px;border-radius:8px;font-weight:700">备货</span></div>
+          <sc-for list="{{ recent }}" as="s" hint-placeholder-count="2">
+            <div style="display:flex;align-items:center;gap:12px;padding:13px 14px;background:#1C1F27;border:1px solid #23262f;border-radius:14px;margin-bottom:10px">
+              <div style="flex:1;min-width:0">
+                <div style="font-size:16px;font-weight:500">{{ s.title }}</div>
+                <div style="font-size:13px;color:#8A90A0;margin-top:2px">{{ s.artistLine }}</div>
+              </div>
+              <span style="font-size:12px;color:#6b7180;font-variant-numeric:tabular-nums">{{ s.dur }}</span>
+              <div onClick="{{ s.onAdd }}" style="{{ s.addBtnStyle }}">
+                <sc-if value="{{ s.added }}" hint-placeholder-val="{{ F }}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#07080b" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l4.5 4.5L19 7"/></svg></sc-if>
+                <sc-if value="{{ s.notAdded }}" hint-placeholder-val="{{ T }}"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#07080b" stroke-width="2.4" stroke-linecap="round"><path d="M12 6v12M6 12h12"/></svg></sc-if>
+              </div>
+            </div>
+          </sc-for>
+          <div style="font-size:12px;color:#8A90A0;font-weight:700;margin:16px 0 10px">全部</div>
+          <sc-for list="{{ all }}" as="s" hint-placeholder-count="4">
+            <div style="display:flex;align-items:center;gap:12px;padding:13px 14px;background:#1C1F27;border:1px solid #23262f;border-radius:14px;margin-bottom:10px">
+              <div style="flex:1;min-width:0">
+                <div style="font-size:16px;font-weight:500">{{ s.title }}</div>
+                <div style="font-size:13px;color:#8A90A0;margin-top:2px">{{ s.artistLine }}</div>
+              </div>
+              <span style="font-size:12px;color:#6b7180;font-variant-numeric:tabular-nums">{{ s.dur }}</span>
+              <div onClick="{{ s.onAdd }}" style="{{ s.addBtnStyle }}">
+                <sc-if value="{{ s.added }}" hint-placeholder-val="{{ F }}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#07080b" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l4.5 4.5L19 7"/></svg></sc-if>
+                <sc-if value="{{ s.notAdded }}" hint-placeholder-val="{{ T }}"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#07080b" stroke-width="2.4" stroke-linecap="round"><path d="M12 6v12M6 12h12"/></svg></sc-if>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- Toast -->
+  <sc-if value="{{ showToast }}" hint-placeholder-val="{{ F }}">
+    <div style="position:absolute;left:50%;bottom:150px;transform:translateX(-50%);background:rgba(28,31,39,.96);border:1px solid #2a2e39;color:#F2F4F8;font-size:13px;font-weight:500;padding:10px 18px;border-radius:22px;box-shadow:0 8px 26px rgba(0,0,0,.5);z-index:40;white-space:nowrap">{{ toast }}</div>
+  </sc-if>
+
+  <!-- Settings -->
+  <sc-if value="{{ showSettings }}" hint-placeholder-val="{{ F }}">
+    <div style="position:absolute;inset:0;background:#0E0F13;z-index:30;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:12px;padding:16px">
+        <div onClick="{{ closeSettings }}" style="width:40px;height:40px;border-radius:50%;background:#1C1F27;display:flex;align-items:center;justify-content:center;cursor:pointer">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#F2F4F8" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+        </div>
+        <div style="font-size:20px;font-weight:700">连接电脑</div>
+      </div>
+      <div style="padding:12px 20px">
+        <div style="display:flex;align-items:center;gap:9px;margin:8px 0 22px">
+          <span style="width:11px;height:11px;border-radius:50%;background:{{ connDotColor }};box-shadow:0 0 8px {{ connDotColor }}"></span>
+          <span style="font-size:14px;color:#8A90A0">{{ connText }}</span>
+        </div>
+        <div style="font-size:12px;color:#8A90A0;font-weight:700;margin-bottom:10px">电脑局域网 IP</div>
+        <input value="{{ ip }}" onInput="{{ onIp }}" style="width:100%;background:#1C1F27;border:1px solid #2a2e39;border-radius:14px;padding:15px;color:#F2F4F8;font-size:17px;outline:none;font-variant-numeric:tabular-nums"/>
+        <div onClick="{{ doConnect }}" style="margin-top:16px;text-align:center;padding:15px;border-radius:14px;background:#45D6FF;color:#07080b;font-size:16px;font-weight:700;cursor:pointer">连接</div>
+        <div style="height:1px;background:#1c1f27;margin:24px 0"></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 2px">
+          <div>
+            <div style="font-size:15px">断开演示</div>
+            <div style="font-size:12px;color:#6b7180;margin-top:3px">切到断开状态,看重连横幅</div>
+          </div>
+          <div onClick="{{ toggleConn }}" style="{{ connTrack }}"><div style="{{ connKnob }}"></div></div>
+        </div>
+        <div style="font-size:12px;color:#6b7180;margin-top:22px;text-align:center">已记住上次连接的电脑</div>
+      </div>
+    </div>
+  </sc-if>
+
+</div>
+
+</x-import>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:&quot;470&quot;,&quot;height&quot;:&quot;960&quot;},&quot;startTab&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;sing&quot;,&quot;queue&quot;,&quot;remote&quot;],&quot;default&quot;:&quot;sing&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;原型&quot;},&quot;connected&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;原型&quot;},&quot;autoplay&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;原型&quot;}}">
+class Component extends DCLogic {
+  constructor(props){
+    super(props);
+    let uid = 1;
+    const mk = (o) => ({ ...o, uid: uid++ });
+    this.state = {
+      tab: (props && props.startTab) || 'sing',
+      connected: !(props && props.connected === false),
+      playing: !(props && props.autoplay === false),
+      t: 0, elapsed: 72,
+      key: 0, source: '伴奏',
+      nowPlaying: { id:'jim', title:'吉姆餐厅', artist:'赵雷', dur:'5:53' },
+      queue: [
+        mk({ id:'gyc', title:'郭源潮', artist:'宋冬野', dur:'4:40' }),
+        mk({ id:'yxj', title:'野心家', artist:'张靓颖', dur:'5:53' }),
+        mk({ id:'bkc', title:'不开的唇', artist:'赵雷', dur:'4:12' }),
+      ],
+      added: {},
+      loading: false,
+      toast: null,
+      showSettings: false,
+      pickerOpen: false,
+      bgmConsole: false,
+      dragUid: null,
+      dragDy: 0,
+      ip: '192.168.1.6',
+      scene: '湿唱',
+      bgmPlaying: true,
+      volume: 62,
+      win: { so:true, ly:true },
+      fab: { r:16, b:236 },
+    };
+    this.state.bgmPlaying = !(this.state.playing && this.state.nowPlaying);
+    this._uid = uid;
+    this.total = 353;
+    this.W = 16;
+    this.ROW = 72;
+  }
+
+  componentDidMount(){
+    this.timer = setInterval(() => {
+      if (!this.state.playing || this.state.loading || !this.state.nowPlaying) return;
+      this.setState(s => {
+        let t = s.t + 0.05; if (t >= this.W) t -= this.W;
+        let elapsed = s.elapsed + 0.05; if (elapsed >= this.total) elapsed = 0;
+        return { t, elapsed };
+      });
+    }, 50);
+  }
+  componentWillUnmount(){ clearInterval(this.timer); if(this._tt) clearTimeout(this._tt); this._cleanup(); this._fabCleanup(); }
+
+  // 演唱时自动暂停背景音乐,不演唱时自动恢复
+  componentDidUpdate(pp, ps){
+    const was = !!ps.nowPlaying && ps.playing;
+    const now = !!this.state.nowPlaying && this.state.playing;
+    if (was !== now){
+      this.setState({ bgmPlaying: !now });
+      this.toast(now ? '开始演唱 · 已暂停背景音乐' : '演唱停止 · 已恢复背景音乐');
+    }
+  }
+
+  // ---- 悬浮球拖动 / 点击 ----
+  fabDown(e){
+    this._fabStart = { x:e.clientX, y:e.clientY, r:this.state.fab.r, b:this.state.fab.b };
+    this._fabMoved = false;
+    this._fm = (ev)=>this._fabMove(ev);
+    this._fu = ()=>this._fabUp();
+    window.addEventListener('pointermove', this._fm, { passive:false });
+    window.addEventListener('pointerup', this._fu);
+    window.addEventListener('pointercancel', this._fu);
+  }
+  _fabMove(e){
+    const f = this._fabStart; if(!f) return;
+    const dx = e.clientX - f.x, dy = e.clientY - f.y;
+    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) this._fabMoved = true;
+    if (e.cancelable) e.preventDefault();
+    const r = Math.max(8, Math.min(346, f.r - dx));
+    const b = Math.max(74, Math.min(720, f.b - dy));
+    this.setState({ fab:{ r, b } });
+  }
+  _fabUp(){
+    this._fabCleanup();
+    if (!this._fabMoved) this.setState(st=>({ bgmConsole:!st.bgmConsole }));
+  }
+  _fabCleanup(){
+    if(this._fm) window.removeEventListener('pointermove', this._fm);
+    if(this._fu){ window.removeEventListener('pointerup', this._fu); window.removeEventListener('pointercancel', this._fu); }
+    this._fm = this._fu = null;
+  }
+
+  genNotes(){
+    if (this._notes) return this._notes;
+    const pitch=[.36,.52,.64,.55,.72,.46,.6,.5,.68,.58,.42,.54,.66,.6,.48,.7];
+    const out=[]; let tt=4, i=0;
+    while (tt < 14){ const dur=0.5+(i%3)*0.11; out.push({start:tt,dur,pitch:pitch[i%pitch.length]}); tt+=dur+0.07; i++; }
+    this._notes=out; return out;
+  }
+
+  fmt(s){ s=Math.floor(s); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
+
+  toast(msg){
+    if (this._tt) clearTimeout(this._tt);
+    this.setState({ toast: msg });
+    this._tt = setTimeout(()=>this.setState({ toast:null }), 1600);
+  }
+
+  add(s){
+    const item = { ...s, uid: this._uid++ };
+    let q = [...this.state.queue, item];
+    let np = this.state.nowPlaying;
+    if (!np){ np = q[0]; q = q.slice(1); this.setState({ t:0, elapsed:72, playing:true }); }
+    this.setState({ queue:q, nowPlaying:np, added:{...this.state.added,[s.id]:true} });
+    this.toast('已加入队列');
+    setTimeout(()=>this.setState(st=>{ const a={...st.added}; delete a[s.id]; return {added:a}; }), 1200);
+  }
+  del(uid){ this.setState(s=>({ queue:s.queue.filter(x=>x.uid!==uid) })); }
+  moveTop(uid){ this.setState(s=>{ const it=s.queue.find(x=>x.uid===uid); return { queue:[it,...s.queue.filter(x=>x.uid!==uid)] }; }); }
+  clearQueue(){ if(this.state.queue.length) this.toast('已清空队列'); this.setState({ queue:[] }); }
+
+  skipNext(){
+    if (!this.state.queue.length){ this.setState({ nowPlaying:null, playing:false }); this.toast('队列已空,演唱结束'); return; }
+    this.setState({ loading:true });
+    setTimeout(()=>{
+      this.setState(s=>({ loading:false, nowPlaying:s.queue[0], queue:s.queue.slice(1), t:0, elapsed:0, playing:true }));
+    }, 900);
+  }
+
+  // ---- 长按拖动重排 ----
+  startPress(uid, e){
+    const y0 = (e.touches && e.touches[0]) ? e.touches[0].clientY : e.clientY;
+    this._pressY = y0; this._pressStartY = y0;
+    this._pressTimer = setTimeout(() => {
+      this.setState({ dragUid: uid, dragDy: 0 });
+      if (navigator.vibrate) navigator.vibrate(12);
+    }, 180);
+    this._mv = (ev) => this._move(ev);
+    this._up = () => this._end();
+    window.addEventListener('pointermove', this._mv, { passive:false });
+    window.addEventListener('pointerup', this._up);
+    window.addEventListener('pointercancel', this._up);
+  }
+  _move(e){
+    const y = e.clientY;
+    if (!this.state.dragUid){
+      if (Math.abs(y - this._pressStartY) > 10){ clearTimeout(this._pressTimer); this._cleanup(); }
+      return;
+    }
+    if (e.cancelable) e.preventDefault();
+    const dy = y - this._pressY;
+    const q = this.state.queue;
+    const from = q.findIndex(x => x.uid === this.state.dragUid);
+    const shift = Math.round(dy / this.ROW);
+    const to = Math.max(0, Math.min(q.length - 1, from + shift));
+    if (to !== from){
+      const arr = [...q]; const [it] = arr.splice(from, 1); arr.splice(to, 0, it);
+      this._pressY = y;
+      this.setState({ queue: arr, dragDy: 0 });
+    } else {
+      this.setState({ dragDy: dy });
+    }
+  }
+  _end(){ clearTimeout(this._pressTimer); if(this.state.dragUid) this.setState({ dragUid:null, dragDy:0 }); this._cleanup(); }
+  _cleanup(){
+    if(this._mv) window.removeEventListener('pointermove', this._mv);
+    if(this._up){ window.removeEventListener('pointerup', this._up); window.removeEventListener('pointercancel', this._up); }
+    this._mv = this._up = null;
+  }
+
+  renderVals(){
+    const s = this.state;
+    const cyan='#45D6FF', white='#EEF1F6';
+
+    // ---- lyric engine ----
+    const L1='不灭的月亮下是不夜的街', L2='生意不错 忙碌的人把一切忘了';
+    let mode,line,next,a,b;
+    const t=s.t;
+    if (t<4){ mode='pre'; line=L1; next=L2; a=0; b=4; }
+    else if (t<9){ mode='sing'; line=L1; next=L2; a=4; b=9; }
+    else if (t<14){ mode='sing'; line=L2; next=L1; a=9; b=14; }
+    else { mode='pre'; line=L1; next=L2; a=14; b=16; }
+    const chars=[...line];
+    let sung=0;
+    if (mode==='sing') sung=Math.round((t-a)/(b-a)*chars.length);
+    const curChars=chars.map((ch,i)=>({ ch, style:'color:'+((mode==='sing'&&i<sung)?cyan:white)+';transition:color .09s;text-shadow:'+((mode==='sing'&&i<sung)?'0 0 14px rgba(69,214,255,.55)':'none') }));
+    let litCount=0;
+    if (mode==='pre'){ const step=(b-a)/4; litCount=Math.min(4,Math.max(0,Math.ceil((b-t)/step))); }
+    const dots=[0,1,2,3].map(i=>({ style:'width:11px;height:11px;border-radius:50%;transition:all .2s;background:'+(i<litCount?cyan:'#2a2e39')+';box-shadow:'+(i<litCount?'0 0 9px rgba(69,214,255,.8)':'none') }));
+
+    // ---- pitch notes ----
+    const REGION_W=380, H=172, PX=66, headX=96, NH=13;
+    const notes=this.genNotes().map((n,idx)=>{
+      const x=headX+(n.start-t)*PX;
+      const active = t>=n.start && t<n.start+n.dur;
+      const w=n.dur*PX, top=(1-n.pitch)*(H-NH-24)+12;
+      const fill=active?Math.min(1,(t-n.start)/n.dur):0;
+      const visible = x>-w-30 && x<REGION_W+30;
+      return { _v:visible, style:'position:absolute;left:'+x.toFixed(1)+'px;top:'+top.toFixed(1)+'px;width:'+w.toFixed(1)+'px;height:'+NH+'px;border-radius:7px;overflow:hidden;border:1.5px solid rgba(0,0,0,.6);background:'+(active?cyan:'#3d6fc9')+';box-shadow:'+(active?'0 0 14px rgba(69,214,255,.85)':'none'), fillStyle:'position:absolute;left:0;top:0;bottom:0;width:'+(fill*100).toFixed(1)+'%;background:rgba(255,255,255,.85)' };
+    }).filter(n=>n._v);
+
+    // ---- library ----
+    const recentSrc=[
+      {id:'jim',title:'吉姆餐厅',artist:'赵雷',dur:'5:53'},
+      {id:'bkc',title:'不开的唇',artist:'赵雷',dur:'4:12'},
+    ];
+    const allSrc=[
+      {id:'gyc',title:'郭源潮',artist:'宋冬野',dur:'4:40'},
+      {id:'yxj',title:'野心家',artist:'张靓颖',sub:'《灼灼韶华》主题曲',dur:'5:53'},
+      {id:'jim',title:'吉姆餐厅',artist:'赵雷',dur:'5:53'},
+      {id:'bkc',title:'不开的唇',artist:'赵雷',dur:'4:12'},
+    ];
+    const addStyle=(added)=>'width:40px;height:40px;flex:none;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;background:'+(added?'#35C08A':cyan)+';box-shadow:0 4px 14px '+(added?'rgba(53,192,138,.4)':'rgba(69,214,255,.4)');
+    const mk=(x)=>({ ...x, artistLine: x.sub?(x.artist+' ·'+x.sub):x.artist, added:!!s.added[x.id], notAdded:!s.added[x.id], addBtnStyle:addStyle(!!s.added[x.id]), onAdd:()=>this.add(x) });
+    const recent=recentSrc.map(mk), all=allSrc.map(mk);
+
+    // ---- queue (drag) ----
+    const dragUid=s.dragUid;
+    const queueRows=s.queue.map((q,i)=>{
+      const dragging=q.uid===dragUid;
+      let slot='margin-bottom:10px';
+      let card='display:flex;align-items:center;gap:10px;padding:12px 12px 12px 6px;background:#1C1F27;border:1px solid #23262f;border-radius:14px;position:relative';
+      if(dragging){
+        slot+=';border:1.5px dashed rgba(69,214,255,.65);border-radius:14px;background:rgba(69,214,255,.06);min-height:60px';
+        card+=';transform:translateY('+s.dragDy+'px);box-shadow:0 16px 34px rgba(0,0,0,.7);opacity:.98;z-index:20;border-color:#45D6FF;background:#232733';
+      } else if(dragUid){ card+=';transition:transform .12s ease'; }
+      return { ...q, idx:i+1, slotStyle:slot, cardStyle:card, onTop:()=>this.moveTop(q.uid), onDel:()=>this.del(q.uid), handleDown:(e)=>this.startPress(q.uid,e) };
+    });
+
+    // ---- scenes (big + mini) ----
+    const SCENES=['聊天','湿唱','干唱','喇叭','闭麦'];
+    const scenes=SCENES.map(name=>{ const active=name===s.scene;
+      return {
+        name,
+        style:'display:flex;align-items:center;justify-content:center;height:56px;border-radius:14px;font-size:16px;font-weight:700;cursor:pointer;transition:all .15s;'+(active?'background:#45D6FF;color:#07080b;box-shadow:0 5px 18px rgba(69,214,255,.4)':'background:#1C1F27;color:#F2F4F8;border:1px solid #2a2e39'),
+        miniStyle:'flex:1;display:flex;align-items:center;justify-content:center;height:34px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;transition:all .15s;'+(active?'background:#45D6FF;color:#07080b':'background:#1a1d25;color:#9aa0b0;border:1px solid #2a2e39'),
+        onTap:()=>this.setState({scene:name})
+      };
+    });
+
+    // ---- toggles ----
+    const track=(on)=>'width:50px;height:30px;border-radius:15px;padding:3px;cursor:pointer;transition:background .2s;display:flex;background:'+(on?cyan:'#2a2e39');
+    const knob=(on)=>'width:24px;height:24px;border-radius:50%;background:#fff;transition:transform .2s;transform:translateX('+(on?'20px':'0')+')';
+
+    // ---- tabs (3) ----
+    const ic={
+      sing:'<svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3" fill="currentColor" stroke="none"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21M8.5 21h7"/></svg>',
+      queue:'<svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11M4 11h11M4 16h6"/><path d="M16 13.2v6.3l5-3.15z" fill="currentColor" stroke="none"/></svg>',
+      remote:'<svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="6.5" y="2.5" width="11" height="19" rx="4"/><circle cx="12" cy="7" r="1.6" fill="currentColor" stroke="none"/><path d="M9.5 12h5M9.5 15.5h5"/></svg>',
+    };
+    const go=(k)=>this.setState({tab:k, showSettings:false, pickerOpen:false});
+    const tcolor=(k)=>s.tab===k?cyan:'#9aa1b2';
+    const tweight=(k)=>s.tab===k?700:500;
+
+    const np=s.nowPlaying;
+    const keyLabel = s.key===0?'原调':(s.key>0?('+'+s.key):(''+s.key));
+    const nextPreview = s.queue.length ? ('下一首:'+s.queue[0].title+' · '+s.queue[0].artist) : '下一首:队列已空';
+    const connColor = s.connected ? '#35C08A' : '#FF5A5A';
+    const showBgmFab = s.tab!=='remote' && !s.showSettings && !s.pickerOpen;
+
+    return {
+      T:true, F:false, devW:412, devH:900,
+      isSing:s.tab==='sing', isQueue:s.tab==='queue', isRemote:s.tab==='remote',
+      // sing
+      hasSong: !!np, noSong: !np, np: np||{title:'',artist:''},
+      keyLabel, source:s.source, playing:s.playing, paused:!s.playing, loading:s.loading,
+      elapsedStr:this.fmt(s.elapsed), totalStr:this.fmt(this.total), progressPct:((s.elapsed/this.total)*100).toFixed(1)+'%',
+      notes, curChars, nextLine:next, dots, showDots:mode==='pre', showSongLabel:mode==='pre',
+      nextPreview, scenesMini:scenes,
+      togglePlay:()=>this.setState({playing:!s.playing}),
+      keyUp:()=>this.setState({key:Math.min(6,s.key+1)}),
+      keyDown:()=>this.setState({key:Math.max(-6,s.key-1)}),
+      toggleSource:()=>this.setState({source:s.source==='伴奏'?'原唱':'伴奏'}),
+      seekBack:()=>this.setState(st=>({ elapsed:Math.max(0,st.elapsed-5), t:(st.t-5+this.W)%this.W })),
+      seekFwd:()=>this.setState(st=>({ elapsed:Math.min(this.total-1,st.elapsed+5), t:(st.t+5)%this.W })),
+      skipNext:()=>this.skipNext(),
+      goSearch:()=>this.setState({tab:'queue', pickerOpen:true}),
+      // picker
+      pickerOpen:s.pickerOpen, recent, all,
+      openPicker:()=>this.setState({pickerOpen:true}),
+      closePicker:()=>this.setState({pickerOpen:false}),
+      // queue
+      queueRows, queueCount:s.queue.length, queueFilled:s.queue.length>0, queueEmpty:s.queue.length===0,
+      clearQueue:()=>this.clearQueue(),
+      // remote / bgm
+      scenes, resetScene:()=>this.toast('已归位'),
+      bgmPlaying:s.bgmPlaying, bgmPaused:!s.bgmPlaying, volume:s.volume, bgmNow:'蒙面哥 - 从来没有忘记过  0:43 / 4:27',
+      bgmToggle:()=>this.setState({bgmPlaying:!s.bgmPlaying}),
+      bgmPrev:()=>this.toast('BGM 上一首'), bgmNext:()=>this.toast('BGM 下一首'),
+      onVol:(e)=>this.setState({volume:+e.target.value}),
+      soTrack:track(s.win.so), soKnob:knob(s.win.so), toggleSO:()=>this.setState({win:{...s.win,so:!s.win.so}}),
+      lyTrack:track(s.win.ly), lyKnob:knob(s.win.ly), toggleLY:()=>this.setState({win:{...s.win,ly:!s.win.ly}}),
+      // floating bgm console
+      showBgmFab, bgmOpen:s.bgmConsole, bgmClosed:!s.bgmConsole,
+      toggleBgm:()=>this.setState({bgmConsole:!s.bgmConsole}),
+      collapseBgm:()=>this.setState({bgmConsole:false}),
+      fabDown:(e)=>this.fabDown(e),
+      fabPos:'position:absolute;right:'+s.fab.r+'px;bottom:'+s.fab.b+'px;z-index:16',
+      fabStyle:'position:relative;width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:grab;touch-action:none;background:rgba(18,20,27,.72);backdrop-filter:blur(10px);border:1px solid rgba(69,214,255,.4);box-shadow:0 8px 24px rgba(0,0,0,.45)'+(s.bgmPlaying?';animation:fabpulse 2s ease-in-out infinite':''),
+      fabBadge:'position:absolute;right:6px;bottom:6px;width:9px;height:9px;border-radius:50%;border:2px solid rgba(18,20,27,.9);background:'+(s.bgmPlaying?'#35C08A':'#6b7180'),
+      // tabs
+      onSing:()=>go('sing'), onQueue:()=>go('queue'), onRemote:()=>go('remote'),
+      singColor:tcolor('sing'), queueColor:tcolor('queue'), remoteColor:tcolor('remote'),
+      singWeight:tweight('sing'), queueWeight:tweight('queue'), remoteWeight:tweight('remote'),
+      // global
+      connected:s.connected, disconnected:!s.connected, connDotColor:connColor,
+      connText: s.connected ? ('已连 '+s.ip) : '未连接',
+      showToast:!!s.toast, toast:s.toast,
+      // settings
+      showSettings:s.showSettings, ip:s.ip,
+      openSettings:()=>this.setState({showSettings:true}),
+      closeSettings:()=>this.setState({showSettings:false}),
+      onIp:(e)=>this.setState({ip:e.target.value}),
+      doConnect:()=>{ this.setState({connected:true, showSettings:false}); this.toast('已连接电脑'); },
+      toggleConn:()=>this.setState({connected:!s.connected}),
+      connTrack:track(!s.connected), connKnob:knob(!s.connected),
+    };
+  }
+}
+</script>
+</body>
+</html>

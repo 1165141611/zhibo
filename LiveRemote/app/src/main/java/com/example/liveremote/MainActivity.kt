@@ -1,158 +1,238 @@
 package com.example.liveremote
 
-import android.content.Intent
-import android.net.Uri
-import android.os.Build
+import android.media.AudioManager
 import android.os.Bundle
-import android.provider.Settings
-import android.widget.Button
-import android.widget.EditText
-import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
+import android.view.KeyEvent
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.liveremote.ui.components.TabQueueIcon
+import com.example.liveremote.ui.components.TabRemoteIcon
+import com.example.liveremote.ui.components.TabSingIcon
+import com.example.liveremote.ui.components.BgmFabOverlay
+import com.example.liveremote.ui.components.noRippleClick
+import com.example.liveremote.ui.screens.PickerSheet
+import com.example.liveremote.ui.screens.QueueScreen
+import com.example.liveremote.ui.screens.RemoteScreen
+import com.example.liveremote.ui.screens.SettingsScreen
+import com.example.liveremote.ui.screens.SingScreen
+import com.example.liveremote.ui.theme.C
+import com.example.liveremote.ui.theme.F
+import com.example.liveremote.ui.theme.LiveRemoteTheme
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
-class MainActivity : AppCompatActivity() {
-
-    private lateinit var ipInput: EditText
-    private var autoStarted = false
+class MainActivity : ComponentActivity() {
+    private val vm: RemoteViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-
-        ipInput = findViewById(R.id.ipInput)
-        val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
-        val savedIp = prefs.getString("ip", "") ?: ""
-        ipInput.setText(savedIp)
-
-        findViewById<Button>(R.id.startBtn).setOnClickListener {
-            val ip = ipInput.text.toString().trim()
-            if (ip.isEmpty()) {
-                toast("请先填电脑IP:端口")
-                return@setOnClickListener
-            }
-            prefs.edit().putString("ip", ip).apply()
-
-            // 需要“显示在其他应用上层”权限
-            if (!Settings.canDrawOverlays(this)) {
-                toast("请授予“显示在其他应用上层”权限,然后返回再点启动")
-                startActivity(
-                    Intent(
-                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:$packageName")
-                    )
-                )
-                return@setOnClickListener
-            }
-
-            enterOverlayWithGate(normalizeUrl(ip))
-        }
-
-        findViewById<Button>(R.id.stopBtn).setOnClickListener {
-            stopService(Intent(this, OverlayService::class.java))
-            toast("已停止")
-        }
-
-        // 启动时:若已保存IP且已授权,则后台探测后端能否连通,
-        // 能连通就直接进入悬浮状态,省去手动点击“启动”。
-        if (savedIp.isNotEmpty() && Settings.canDrawOverlays(this)) {
-            tryAutoStart(normalizeUrl(savedIp))
-        }
-    }
-
-    private fun normalizeUrl(ip: String): String =
-        if (ip.startsWith("http")) ip else "http://$ip"
-
-    private fun tryAutoStart(url: String) {
-        if (autoStarted) return
-        Thread {
-            val ok = ping(url)
-            runOnUiThread {
-                if (ok && !autoStarted && !isFinishing) {
-                    autoStarted = true
-                    enterOverlayWithGate(url)
-                }
-            }
-        }.start()
+        enableEdgeToEdge()   // 自绘状态栏/导航栏区域,由 Compose 用 WindowInsets 留白
+        setContent { LiveRemoteTheme { App(vm) } }
     }
 
     /**
-     * 进入悬浮态前的闸门:后台问 PC(/scrcpy/check)现在能否经无线 adb 连上手机投屏。
-     * 能连 / 查不到(旧服务或网络问题)→ 直接进入;明确连不上 → 弹窗排查(可仍然进入)。
+     * 音量键 → 伴奏音量:唱歌时(已连接且有当前曲)按键先正常调手机媒体音量(弹系统音量条),
+     * 再把新的百分比经 WS 同步给电脑播放器,伴奏音量始终 = 手机媒体音量百分比。
+     * 空闲/未连接时不拦截,音量键保持系统默认行为。长按连发同样生效(onKeyDown 会重复回调)。
      */
-    private fun enterOverlayWithGate(url: String) {
-        Thread {
-            var notReady = false
-            var msg = ""
-            try {
-                val c = URL("$url/scrcpy/check").openConnection() as HttpURLConnection
-                c.connectTimeout = 4000
-                c.readTimeout = 8000   // PC 端要跑 adb connect,给足时间
-                c.requestMethod = "GET"
-                c.useCaches = false
-                if (c.responseCode == 200) {
-                    val body = c.inputStream.bufferedReader().use { it.readText() }
-                    val j = JSONObject(body)
-                    notReady = !j.optBoolean("reachable", false)
-                    msg = j.optString("msg", "")
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            val st = vm.state.value
+            if (st.connected && st.hasSong) {
+                val am = getSystemService(AUDIO_SERVICE) as AudioManager
+                am.adjustStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER,
+                    AudioManager.FLAG_SHOW_UI,
+                )
+                vm.syncKaraokeVolFromPhone()
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+}
+
+@Composable
+private fun App(vm: RemoteViewModel) {
+    val st by vm.state.collectAsStateWithLifecycle()
+    val library by vm.library.collectAsStateWithLifecycle()
+    val lyrics by vm.lyrics.collectAsStateWithLifecycle()
+
+    var tab by rememberSaveable { mutableStateOf("sing") }
+    var showSettings by remember { mutableStateOf(false) }
+    var pickerOpen by remember { mutableStateOf(false) }
+
+    // Toast
+    var toastMsg by remember { mutableStateOf<String?>(null) }
+    var toastSeq by remember { mutableIntStateOf(0) }
+    LaunchedEffectCollectToast(vm) { toastMsg = it; toastSeq++ }
+    if (toastMsg != null) {
+        androidx.compose.runtime.LaunchedEffect(toastSeq) { delay(1600); toastMsg = null }
+    }
+
+    // 返回键:浮层(设置/点歌抽屉)开着先关浮层;否则两次返回才退出(2s 内第二次生效),防误触退到桌面。
+    val activity = androidx.compose.ui.platform.LocalContext.current as? ComponentActivity
+    var lastBackAt by remember { mutableLongStateOf(0L) }
+    BackHandler {
+        when {
+            showSettings -> showSettings = false
+            pickerOpen -> pickerOpen = false
+            else -> {
+                val now = System.currentTimeMillis()
+                if (now - lastBackAt < 2000L) {
+                    activity?.finish()
+                } else {
+                    lastBackAt = now
+                    toastMsg = "再按一次退出程序"; toastSeq++
                 }
-                c.disconnect()
-            } catch (_: Exception) {
-                notReady = false   // 查不到就不拦,放行进入
             }
-            runOnUiThread {
-                if (isFinishing) return@runOnUiThread
-                if (notReady) showScrcpyGateDialog(url, msg) else enterOverlay(url)
-            }
-        }.start()
-    }
-
-    private fun enterOverlay(url: String) {
-        startOverlay(url)
-        toast("悬浮控制台已启动")
-        moveTaskToBack(true)   // 退到后台,让悬浮窗浮在K歌上层
-    }
-
-    private fun showScrcpyGateDialog(url: String, msg: String) {
-        AlertDialog.Builder(this)
-            .setTitle("电脑暂时连不上手机投屏")
-            .setMessage(
-                (if (msg.isNotEmpty()) "$msg\n\n" else "") +
-                    "排查:\n" +
-                    "· 手机刚重启过?用数据线连电脑执行一次 adb tcpip 5555\n" +
-                    "· 手机与电脑是否在同一 WiFi\n\n" +
-                    "也可先仍然进入,投屏状态见悬浮窗左上角圆点(可点它重试)。"
-            )
-            .setPositiveButton("仍然进入") { _, _ -> enterOverlay(url) }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    /** 短超时探测后端是否可达。 */
-    private fun ping(url: String): Boolean = try {
-        val c = URL(url).openConnection() as HttpURLConnection
-        c.connectTimeout = 1200
-        c.readTimeout = 1200
-        c.requestMethod = "GET"
-        c.useCaches = false
-        val code = c.responseCode
-        c.disconnect()
-        code in 200..499   // 有响应即视为可达
-    } catch (_: Exception) {
-        false
-    }
-
-    private fun startOverlay(url: String) {
-        val svc = Intent(this, OverlayService::class.java).putExtra("url", url)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(svc)
-        } else {
-            startService(svc)
         }
     }
 
-    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+    // 进度本地插值(时钟源=电脑播放器,每 ~500ms WS 推一次真实进度)。帧驱动、只在绘制作用域读取,
+    // 不再像老版那样每 50ms 重建全局 st 触发整树重组——那是卡顿主因。见 rememberPlayhead。
+    val playhead = com.example.liveremote.ui.components.rememberPlayhead(st.posMs, st.playing, st.durMs)
+
+    val goPick = { tab = "queue"; pickerOpen = true }
+
+    Box(Modifier.fillMaxSize().background(C.Bg)) {
+        Column(Modifier.fillMaxSize()) {
+            // 状态栏留白(不与系统时间/电量重叠)
+            Spacer(Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars))
+            AnimatedVisibility(!st.connected) { DisconnectedBanner() }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                when (tab) {
+                    "sing" -> SingScreen(
+                        st = st, playhead = playhead, lyrics = lyrics,
+                        onOpenSettings = { showSettings = true },
+                        onScene = vm::setScene, onKeyDelta = vm::keyDelta, onSeek = vm::seekDelta,
+                        onPlayPause = vm::playPause, onToggleSource = vm::toggleVocal, onGoPick = goPick,
+                    )
+                    "queue" -> QueueScreen(
+                        st = st, onOpenPicker = { pickerOpen = true }, onSkipNext = vm::playNext,
+                        onClear = vm::clearQueue, onRemove = vm::removeAt, onMove = vm::moveInQueue,
+                        onMoveTop = vm::moveTop, onOpenSettings = { showSettings = true },
+                    )
+                    "remote" -> RemoteScreen(
+                        st = st, host = vm.currentHost(),
+                        onScene = vm::setScene, onReset = vm::resetScene,
+                        onBgmPrev = vm::bgmPrev, onBgmToggle = vm::bgmToggle, onBgmNext = vm::bgmNext, onVol = vm::setVolume,
+                        onStudio = vm::toggleStudio, onPlayerWin = vm::togglePlayerWindow,
+                        onOpenSettings = { showSettings = true },
+                    )
+                }
+            }
+            TabBar(tab) { tab = it }
+        }
+
+        // 悬浮 QQ音乐(除遥控页/设置/抽屉外)
+        if (tab != "remote" && !showSettings && !pickerOpen) {
+            BgmFabOverlay(st, vm::bgmPrev, vm::bgmToggle, vm::bgmNext, vm::setVolume)
+        }
+
+        // Toast
+        toastMsg?.let { msg ->
+            Box(Modifier.fillMaxSize().padding(bottom = 150.dp), contentAlignment = Alignment.BottomCenter) {
+                Box(
+                    Modifier.clip(RoundedCornerShape(22.dp)).background(Color(0xFF1C1F27).copy(alpha = 0.96f))
+                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                ) { Text(msg, color = C.Text, fontSize = F.sub) }
+            }
+        }
+
+        // 点歌抽屉
+        if (pickerOpen) {
+            PickerSheet(library = library, onAdd = vm::enqueue, onClose = { pickerOpen = false })
+        }
+
+        // 设置(全屏覆盖)
+        if (showSettings) {
+            SettingsScreen(
+                host = vm.currentHost(), connected = st.connected, onClose = { showSettings = false },
+                onConnect = { vm.connect(it); showSettings = false }, onDisconnect = vm::disconnect,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LaunchedEffectCollectToast(vm: RemoteViewModel, onMsg: (String) -> Unit) {
+    androidx.compose.runtime.LaunchedEffect(Unit) { vm.toast.collect { onMsg(it) } }
+}
+
+@Composable
+private fun DisconnectedBanner() {
+    Row(
+        Modifier.fillMaxWidth().background(C.DisconnBannerBg).padding(vertical = 8.dp, horizontal = 12.dp),
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("与电脑断开,重连中…", color = C.DisconnBannerFg, fontSize = F.sub, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun TabBar(current: String, onTab: (String) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().background(C.TabBar).navigationBarsPadding().padding(top = 7.dp, bottom = 4.dp),
+    ) {
+        TabItem("sing", "演唱", current, onTab) { c, s -> TabSingIcon(c, s) }
+        TabItem("queue", "队列", current, onTab) { c, s -> TabQueueIcon(c, s) }
+        TabItem("remote", "遥控", current, onTab) { c, s -> TabRemoteIcon(c, s) }
+    }
+}
+
+@Composable
+private fun androidx.compose.foundation.layout.RowScope.TabItem(
+    key: String, label: String, current: String, onTab: (String) -> Unit,
+    icon: @Composable (Color, androidx.compose.ui.unit.Dp) -> Unit,
+) {
+    val active = key == current
+    val color = if (active) C.Accent else C.TabIdle
+    Column(
+        Modifier.weight(1f).noRippleClick { onTab(key) }.padding(vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        icon(color, 25.dp)
+        Text(label, color = color, fontSize = F.tiny, fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+            textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
+    }
 }

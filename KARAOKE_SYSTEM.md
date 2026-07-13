@@ -1,0 +1,164 @@
+# K歌直播系统 —— 总体方案与路线图
+
+> 本文是**整合后的目标架构与路线图**,跨三个子项目(`karaoke-player` / `live-remote` / `LiveRemote`)。
+> 具体某个部件的实现细节看它自己的 README;本文只讲"整个系统长什么样、为什么这么定、分几步做"。
+> 定案时间 2026-07-13,随推进更新(改了架构/决策请同步改本文)。
+
+## 一、目标
+
+一个人直播唱歌:全民K歌(WeSing)负责出伴奏/评分太笨重且投屏歌词抠图差。目标是**自制K歌播放器接管
+伴奏+歌词**,**手机变成全屏遥控+点歌台**,**电脑 pc-service 当唯一中枢**,人可以离开电脑。
+
+## 二、总架构
+
+```
+┌────────────────────────────┐      ┌──────────────────────────────────────────┐
+│ 手机 App(原生Kotlin,歌房式) │      │ 电脑 pc-service(FastAPI,唯一中枢,常驻)   │
+│ 底部 TabBar:               │◄WS──►│ ├─ 曲库:监视WeSing缓存自动入库→library.json │
+│  演唱(卡拉OK字幕+音准线)   │ 实时 │ ├─ 队列:排队/唱完切下首暂停/重排/删        │
+│  点歌 / 队列 / 遥控         │ 推送 │ ├─ 控制API + WS推送(进度/状态/歌单更新)   │
+└────────────────────────────┘      │ ├─ 声卡场景(MIDI→StudioOne)+ QQ音乐BGM   │
+                                     │ └─ IPC(stdin/stdout)托管↓播放器           │
+                                     └───────────────┬──────────────────────────┘
+                                       IPC:载歌/播停/│升降调/原唱/seek;读进度+可见性
+                                                     ▼
+                          ┌────────────────────────────────────────────────┐
+                          │ K歌播放器(karaoke-player,独立子进程)            │
+                          │ 音频引擎:载歌/解密/WSOLA变调/原唱 → 声卡PLAYBACK1/2 │
+                          │ 渲染:绿底黑描边逐字歌词+音高+KTV圆点(时钟源)     │
+                          └───────────────┬────────────────────────────────┘
+                                          │ 直播画面:窗口/全屏捕获 → 绿幕抠掉绿
+                                          ▼
+                          ┌────────────────────────────────────────────────┐
+                          │ 直播伴侣(抖音):捕获渲染窗 + 绿幕 → 观众看到歌词  │
+                          └────────────────────────────────────────────────┘
+```
+
+**核心:pc-service 是唯一中枢**,手机和播放器都是它的客户端。手机发指令→中枢→控制播放器;
+播放器/监视器状态变化→中枢→WS 推给手机。**电脑播放器是时钟源**,手机/直播画面按其进度同步。
+
+## 三、已定关键决策
+
+| 项 | 决策 | 备注 |
+|---|---|---|
+| 数据来源 | PC 版 WeSing 缓存 `D:\WeSingCache\WeSingDL\Res\<mid>\` | 伴奏/原唱/音高/歌词齐全,纯 PC 自包含,不依赖手机 |
+| 解密 | 伴奏/原唱 PCM=静态256字节XOR;歌词QRC=三重魔改DES | 已破解,见 karaoke-player |
+| 升降调 | 连续流式 **WSOLA**(audiotsm),在音频引擎里实时秒切 | 时域算法,无金属声;分块/相位声码器都是坑 |
+| 音频输出 | 声卡 ROUTIST `PLAYBACK 1/2`(WASAPI 设备 27) | =BGM那条路由;别走 3/4(麦克风监听会回授) |
+| 点歌 | **队列(KTV式)**:连点排队、可重排/删;**唱完不自动连播**——切到下一首开头暂停,BGM 顶上,主播手动开唱 | 2026-07-13 按作者要求由"自动连播"改为"切下首暂停" |
+| 手机端 | **原生 Kotlin App(歌房式,Jetpack Compose)**:底部 TabBar **三页签**=演唱(默认,卡拉OK字幕+音准线)/队列(含点歌抽屉)/遥控 | 2026-07 定原生;**已出高保真原型**并据此定稿(见下"手机端设计定稿")。卡拉OK渲染用 Compose Canvas 重写 |
+| 直播画面歌词 | **自渲染绿底+黑描边 → 窗口捕获 → 直播伴侣绿幕抠图** | 不用浏览器源(没这素材)、不用SMTC歌词助手(下) |
+| 前奏/间奏 | KTV 引导圆点(提前显示行+倒计时圆点,无缝接高亮) | |
+| 音高提示线 | 给歌手自己看,放手机端(和直播画面歌词分开) | 观众不需要音高线 |
+| 时钟/同步 | 电脑播放器为时钟源,进度经 WS 每~500ms 推,手机**帧驱动本地插值** | 逐字高亮和直播/手机三方同步。**插值必须帧驱动、只在绘制作用域读**(见下"性能红线") |
+
+### 手机端设计定稿(2026-07-13,据高保真原型)
+
+原型 + 说明在 `UI design/App prototype development plan/`(`直播K歌遥控台.dc.html` / `设计说明.md`);
+开发规范抽成 [`LiveRemote/UI_SPEC.md`](LiveRemote/UI_SPEC.md)(配色/字体/圆角/组件/交互/字段映射)。相对最初
+brief([`LiveRemote/UI_DESIGN.md`](LiveRemote/UI_DESIGN.md),已作历史 brief 留存)的**关键调整**:
+
+1. **四页签 → 三页签**:取消独立「点歌」页,并入「队列」页(点歌=队列页里按钮 → 底部弹出选歌抽屉)。
+2. 演唱页控制条:「下一首」→ **步退/步进(±5s)**;**切歌只在队列页**「演唱中」卡片的 ⏭。
+3. 演唱页**新增声卡场景快切行**(聊天/湿唱/干唱/喇叭/闭麦,无归位),与遥控页同步。
+4. **悬浮 QQ音乐迷你控制台**:半透明可拖动悬浮球,除遥控页外常驻,点击展开、失焦收起。
+5. 队列**长按拖动重排** + 青色虚线占位空槽。
+6. **演唱 ↔ 背景音乐联动**:开唱自动暂停 QQ音乐,停唱/空队列/暂停自动恢复(轻提示)。
+
+**技术栈:Jetpack Compose**(声明式,贴合原型)。**演唱页卡拉OK数据已打通**:pc-service 增
+`GET /song/{mid}/karaoke`(`karaoke_data.py`,QRC 逐字时间轴 + `.note` 音高线归一化),手机切歌时拉一次喂
+`KaraokeStage` 渲染逐字高亮 + 音准块 + KTV 圆点。②-2 的 WS 仍只推 `pos/dur/title/key/vocal`(进度/状态),
+歌词/音高走这个 HTTP 接口。
+
+**为什么不用这两条更省事的路(踩过,记录在案):**
+- ❌ 浏览器源:抖音直播伴侣**没有**"浏览器"素材类型;窗口捕获普通浏览器是白底;且浏览器非前台会停动画。
+- ❌ SMTC 歌词助手:技术上能让它识别(发布 SMTC 会话),但它**按歌名查自己的在线词库**、只有**行级**、
+  **无逐字无音高**、未必收录现场/K歌特供版 → 不满足"精确逐字+音高"。(代码 `smtc_publisher.py` 留着,弃用。)
+
+## 四、各部件职责
+
+- **pc-service(中枢,`live-remote/pc-service`)**:曲库监视器 + 队列 + 控制API + WS推送 + 网页UI;
+  原有声卡场景/QQ音乐BGM 保留。**不含音频引擎**——它通过**进程管道 IPC**(stdin 发指令/stdout 读状态)
+  托管并控制独立的播放器子进程。
+- **K歌播放器(`karaoke-player/player.py`,独立子进程)**:音频引擎(载歌/解密/WSOLA变调/原唱切换/
+  输出声卡)+ 绿底黑描边逐字歌词/音高条/KTV圆点渲染,供直播伴侣窗口捕获+绿幕。由 pc-service 拉起、
+  经 IPC 控制(现已实现:显隐/清空全绿/禁关;待扩展:载任意歌/播停/升降调/seek/上报进度)。
+  **决策:播放器保持独立子进程(不并入 pc-service)**——因 pc-service 托盘是 pystray、独占主线程消息
+  循环,与 Qt `QApplication.exec()` 冲突;且播放器音频引擎自带线程+sounddevice,天然隔离。
+- **手机 App(`LiveRemote`,原生 Kotlin,歌房式)**:底部 TabBar = 演唱(默认:卡拉OK逐字字幕+音准线,
+  Kotlin Canvas 自定义 View 渲染,数据取自曲库、进度由 pc-service WS 推)/ 点歌(曲库列表+搜索)/ 队列
+  (排队/重排/删)/ 遥控(声卡场景+BGM,可原生或嵌 WebView 复用现有网页)。WebSocket 客户端连 pc-service。
+- **直播伴侣(抖音)**:窗口/全屏捕获渲染窗 + 绿幕抠掉绿色。
+
+## 五、数据流
+
+1. **备货**:在 WeSing 里唱一遍某歌 → `Res\<mid>\` 落盘 → 监视器把四件套拷进永久曲库 + 解 QRC 取
+   歌名/歌手 → 更新 `library.json`。(WeSing 缓存是 LRU 只留约4首,必须及时抢救。)
+2. **点歌**:手机搜曲库 → 点歌进队列 → 中枢控播放器载歌+播 → 伴奏输出声卡(进 Studio One 混音→直播)。
+3. **同步**:播放器(时钟)进度 → 中枢每~500ms WS 推 → 手机/直播画面渲染按进度插值滚动。
+
+### 性能红线(2026-07-13 血泪教训,做同步/渲染/遥控前必读)
+
+一次"歌词卡顿+按钮失灵+连续操作卡死"排查出**三层各一个坑,叠加致命**,已修,后续勿再犯:
+
+1. **手机端插值必须帧驱动、只在绘制作用域读播放头**。❌ 老版每 50ms `st.copy(posMs=…)` 重建全局状态
+   传给所有页面 → 整棵 Compose 树 20fps 重组、`buildAnnotatedString` 反复分配 → UI 线程吃满、卡顿+按钮无反馈。
+   ✅ 用 `rememberPlayhead` 返回 `State<Int>`,**只在 `Canvas` onDraw / `derivedStateOf` 里读 `.value`**——每帧
+   只失效绘制层,不触发重组。歌词按"当前行/已唱字数/圆点数"离散量 `derivedStateOf`,进度条用 `SmoothProgressBar`。
+   **且回推校正不能每拍硬重锚**:服务端 `k_pos` 每 ~500ms 一拍、带传输延迟+抖动,每拍硬跳回服务端值会让
+   播放头周期性后退几十 ms(高亮一卡一卡)。✅ 只在开播/暂停/seek/换歌(偏差 >350ms)硬校正,平时把偏差
+   折算成 ±10% 内速率微调(clock slewing)在 ~1s 内追平——见 `LiveRemote` 的 `Playhead.kt`。
+2. **pc-service 事件循环里绝不 `.result()` 等 pycaw/阻塞 IO**。❌ `bgm_vol/ping` 直接 `set_qq_volume()` →
+   `.result(timeout=8)`,渐变占着单线程 pycaw 时整个事件循环卡死→WS 全停。✅ `schedule_qq_volume`(乐观 STATE
+   +合并拖动+丢 pycaw 线程)、`schedule_qq_volume_read`;`_player_send` 走**专用单线程 IO 执行器**(FIFO 保序)。
+3. **播放器 GUI 线程绝不做整段 PCM 解码等重活**。❌ `set_vocal` 里 `load_pcm` 同步解码原唱,连点即冻窗。
+   ✅ 首次加载放后台线程,`engine.swap_buffer`(自带锁)跨线程安全;60fps 重绘加 `isVisible()` 守卫。
+4. **新歌刷新**:监视器入库后 → 推"歌单已更新" → 手机重拉列表,实时看到新歌。
+
+## 六、路线图(分阶段)
+
+1. **曲库导入器**(先止血,防止唱过的歌被清):`import.py` 手动版 → 升级成 pc-service 里的后台监视器;
+   曲库结构 `KaraokeLibrary\<mid>\`(四件套 + `meta.json`)+ `library.json` 清单。
+2. **播放器音频控制 IPC + pc-service 选歌/队列/控制 API**(注意:音频引擎**不并入** pc-service,
+   而是留在播放器子进程,pc-service 经**进程管道 IPC**(stdin 发指令/stdout 读状态,现已用于显隐)
+   控制):① 播放器侧扩展 IPC——**载入曲库任意歌**(去掉写死曲目)、播/停、升/降调、原唱切换、seek、
+   上报进度;② pc-service 侧——曲库列表/搜索、点歌队列(排队/下一首/重排/删)、播放控制,做成
+   WebSocket/HTTP API,进度经 WS 推送。
+3. **原生 App(歌房式,Jetpack Compose)**:三页签=演唱/队列(含点歌抽屉)/遥控;据高保真原型定稿
+   (规范见 [`LiveRemote/UI_SPEC.md`](LiveRemote/UI_SPEC.md))。演唱页用 Compose Canvas 重写卡拉OK逐字字幕+
+   音准线(算法照搬网页版 `lyrics_overlay_demo.html`),WS 客户端连 pc-service。**已含后端补丁**:pc-service
+   增 `GET /song/{mid}/karaoke`(歌词/音高)+ `kqueue_move`(队列重排)。**App 已 assembleDebug 出包**,
+   三页签 + WS 客户端 + 队列拖拽 + 点歌抽屉 + 遥控 + 悬浮 BGM + 演唱页卡拉OK数据全部落地。
+4. **端到端联调 + 直播绿幕接入**:App(歌手看词/点歌/控制)↔ pc-service ↔ 播放器(声卡+直播绿幕),整体跑通。
+
+## 七、进度
+
+- **已完成**:
+  - 单曲《吉姆餐厅》Demo 全通 —— 数据提取+解密、实时 WSOLA 升降调、原唱/伴奏切换、绿底黑描边渲染
+    + KTV 引导圆点(仅长间奏)、尾奏隐藏竖线、绿幕抠图效果 OK。详见 [karaoke-player/README.md](karaoke-player/README.md)。
+  - **路线图第②步的播放器侧(②-1)已落地**:播放器去掉写死曲目,支持从曲库载入任意歌 + 全套音频控制
+    IPC(`load/play/pause/playpause/seek/key/key±/vocal/vocal_toggle`)+ `STATE` 进度上报(每500ms)。
+    命令行直连验证:换歌/播放/升降调/原唱/seek 全通,换歌自动归位清调。协议见
+    [karaoke-player/README.md](karaoke-player/README.md#服务模式-ipc-协议pc-service--播放器)。
+  - **路线图第②步的服务器侧(②-2)已落地**:pc-service 把播放器 IPC 接进 WebSocket——曲库列表
+    (`GET /library`)、点歌队列(`kqueue_add/remove/next/clear`,入队空闲即开唱;**唱完切下一首开头暂停**,
+    不自动连播,BGM 由手机联动顶上——2026-07-13 起,原为自动下一首)、
+    播放控制(`kplay/kpause/kkey/kvocal/kseek/kshow/khide`),并把 K歌状态(`now`/`queue`/进度/调/原唱/
+    可见性/曲库数)随 WS `state` 推给手机。实测验证:入队自动开唱、控制指令、`/library` 返回歌单、
+    唱完自动切下一首(过渡约 1.5s 加载新歌)全通。详见 [live-remote/README.md](live-remote/README.md) 第三节
+    "K歌 API"。**至此第②步整体完成**,下一步进第③步原生 App。
+  - **路线图第①步(曲库导入器)+ 播放器托管已落地**:pc-service 加了自动曲库监听器
+    (`library.py`,WeSing 缓存→`D:\KaraokeLibrary`+`library.json`+`meta.json`)、托管 K歌播放器子进程
+    (子进程 + `karaoke_win.py` HWND 显隐,player 加 `--hidden/--paused/--no-smtc`)、托盘动态显示曲库数/
+    监听状态/显隐;并移除了旧的 scrcpy 自动投屏。详见 [live-remote/README.md](live-remote/README.md) 第三节
+    与 [live-remote/DEV_LOG.md](live-remote/DEV_LOG.md) 第九节。
+- **待做**:第③步原生 Kotlin App(歌房式:演唱/点歌/队列/遥控 Tab,演唱页 Kotlin Canvas 重写卡拉OK
+  逐字字幕+音准线,WS 客户端连 pc-service)—— 等用户拿 `LiveRemote/UI_DESIGN.md` 出原型后据原型开发;
+  第④步端到端联调 + 直播绿幕接入。**第①②步(曲库导入器 + 播放器托管 + 音频控制/队列 WS API)均已完成。**
+
+## 八、关键事实速查
+
+- Python:`C:\Users\11651\AppData\Local\Programs\Python\Python313\python.exe`(PATH 里的是 Store 占位版,不能用)。
+- 运行播放器:`python player.py --device 27`(声卡 PLAYBACK 1/2)。
+- 依赖:`numpy scipy sounddevice PySide6 audiotsm pycryptodome`(+ SMTC 若用:`winrt-Windows.Media.Playback` 等)。
+- 密钥/解密:`karaoke-player/wesing_pcm_key.py`(PCM XOR)、`tripledes.py`+`qmc1.py`(QRC DES)。仅自用勿外传。

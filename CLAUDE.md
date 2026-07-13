@@ -10,6 +10,9 @@
 - `LiveRemote/` = 安卓遥控 App(Kotlin),开发中。
 - `karaoke-player/` = 自制K歌播放器(Python/PySide6),单曲 Demo 已通。
 
+**整合大方案与路线图见 [KARAOKE_SYSTEM.md](KARAOKE_SYSTEM.md)** —— K歌播放器 + pc-service 中枢 + 手机全屏
+点歌台的目标架构、已定决策、分阶段路线。**做 K歌 相关大功能前先读它**,别被单次微调的上下文带偏。
+
 ## 二、协作规则(重要)
 
 1. **改代码 → 同步更新文档**。改了任何子项目的代码,必须在同一次改动里更新对应文档,保持一致:
@@ -17,9 +20,11 @@
    - `karaoke-player/` → 更新 `karaoke-player/README.md`(尤其"代码结构""关键技术决策""TODO")。
    - `LiveRemote/` → 更新 `LiveRemote/README.md`。
    - 影响到整体结构/新增子项目/跨项目约定 → 更新根 `README.md` 和本 `CLAUDE.md`。
+   - 影响到 K歌 整合系统的架构/决策/路线 → 更新 `KARAOKE_SYSTEM.md`。
    文档过期比没有文档更坑,别只改代码不改文档。
 2. **不提交可再生的大文件/临时产物**:内存 dump(`.pkl`)、试听/调试音频(`.wav`)、日志(`.log`)、
-   `__pycache__`、变调临时文件等。各子项目已配 `.gitignore`,新增此类产物请加进去。
+   `__pycache__`、变调临时文件等。根目录有全局兜底 `.gitignore`(系统/IDE/Python 通用垃圾),
+   各子项目另配自己的 `.gitignore`,新增此类产物请加进对应文件。
 3. **密钥/私有数据**:`karaoke-player/wesing_pcm_key.py` 等解密密钥仅供本机自用,勿分发、勿外传。
 4. **破坏性操作先确认**:删文件、清目录、重置前先看清楚内容;不要删你没创建、且与描述不符的东西。
 5. **文档与注释用中文**(与作者、现有文档一致)。
@@ -44,9 +49,10 @@
 
 ## 五、当前进展与下一步
 
-- **live-remote**:PC 服务(声卡场景 + QQ音乐 + 显隐窗口)已完成验证。
+- **live-remote**:PC 服务(声卡场景 + QQ音乐 + 显隐窗口)已完成验证。**阶段一整合已接入**:自动曲库
+  导入器(`library.py`)、托管 K歌播放器子进程(`karaoke_win.py` 显隐)、托盘曲库数/监听状态、移除 scrcpy 投屏。
 - **LiveRemote**:安卓悬浮壳 + WebView 方案,开发中。
-- **karaoke-player**:单曲《吉姆餐厅》Demo 全通(歌词/音高/解密伴奏/实时升降调)。下一步:曲库导入器、
-  多曲选歌、验证直播伴侣窗口捕获、界面打磨。
+- **karaoke-player**:单曲《吉姆餐厅》Demo 全通(歌词/音高/解密伴奏/实时升降调/绿幕)。下一步(K歌整合):
+  音频控制 API + 网页选歌队列 + 手机全屏 + 直播绿幕接入。**做 K歌 大功能前先读根 [KARAOKE_SYSTEM.md](KARAOKE_SYSTEM.md)。**
 
 > 更细的历史与踩坑记录在各子项目 README 及 `live-remote/DEV_LOG.md`。

@@ -42,22 +42,19 @@ FADE_SECONDS = 1.0
 # 老版可能是 QQMusic.exe,这里列一组候选,谁在出声就调谁。
 QQMUSIC_PROCS = ["MediaSDK_Server.exe", "QQMusic.exe"]
 
-# ── scrcpy 无线投屏 ───────────────────────────────────
-# 进入悬浮态时,PC 自动经无线 adb 连手机并拉起 scrcpy(只投屏、不带声音)。
-# 采用【安卓11无线调试】(端口动态,靠 adb mDNS 发现)——需先手动配对过一次:
-#     adb pair 手机IP:配对端口     (配对码见手机"无线调试"页)
-ADB_PATH = "adb"          # 在 PATH 里,直接用命令名
-SCRCPY_PATH = "scrcpy"    # 在 PATH 里
+# ── K歌播放器(独立子进程,由本服务拉起 + 按 HWND 显隐)──
+import os as _os, sys as _sys
+BASE_DIR = _os.path.dirname(_os.path.abspath(__file__))
+KARAOKE_DIR   = _os.path.abspath(_os.path.join(BASE_DIR, "..", "..", "karaoke-player"))
+PLAYER_PATH   = _os.path.join(KARAOKE_DIR, "player.py")
+PLAYER_PYTHON = _sys.executable    # 与本服务同一解释器(已装 PySide6/sounddevice/numpy/audiotsm)
+PLAYER_DEVICE = 27                 # sounddevice 输出设备索引(已验证=ROUTIST PLAYBACK 1/2)
+PLAYER_TITLE  = "KaraokePlayer"    # 播放器窗口标题(player.py 里写死),karaoke_win 靠它找 hwnd
 
-# 无线连接方式:两条路都会试,谁先连上用谁。
-#  A)固定端口(推荐,免配对码):先用数据线执行一次 `adb tcpip 5555`,
-#    之后拔线,PC 直接 `adb connect 手机IP:5555`。手机重启后需再执行一次 tcpip。
-#    把 SCRCPY_FIXED_PORT 设为 0 可关闭这条路。
-#  B)安卓11无线调试(动态端口):需先 `adb pair 手机IP:配对端口` 配对一次,
-#    之后端口每次随机,PC 靠 adb mDNS 自动发现。配对可持久(手机重启也在)。
-SCRCPY_FIXED_PORT = 5555  # A 方案端口;0 = 停用,只走 mDNS 动态发现
-SCRCPY_USE_MDNS = True    # B 方案:找不到固定端口时,用 mDNS 发现动态端口
-
-# scrcpy 启动参数。--no-audio = 不抓手机声音;可按需加裁剪/窗口标题等,例如:
-#   "--window-title=手机投屏", "--crop=1080:1230:0:1500", "--stay-awake"
-SCRCPY_ARGS = ["--no-audio", "--window-title=手机投屏"]
+# ── 自动曲库导入器 ────────────────────────────────────
+# 监听 WeSing 缓存(LRU 只留最近几首),把唱过的歌四件套拷进永久曲库,防被清掉。
+WESING_RES_DIR        = r"D:\WeSingCache\WeSingDL\Res"
+KARAOKE_LIBRARY_DIR   = r"D:\KaraokeLibrary"
+LIBRARY_JSON          = _os.path.join(KARAOKE_LIBRARY_DIR, "library.json")
+LIBRARY_SCAN_INTERVAL = 10.0       # 轮询间隔(秒)
+LIBRARY_SUFFIXES      = ("_accompany.pcm", "_kongsinger.pcm", ".note", ".qrc")

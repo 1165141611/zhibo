@@ -1,0 +1,20 @@
+# 根目录全局兜底(各子项目另有自己的 .gitignore,见 CLAUDE.md 协作规则 2)
+
+# 操作系统垃圾文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 编辑器 / IDE(LiveRemote/.idea 由 Android Studio 自带的 .idea/.gitignore 管理,不在此全局忽略)
+.vscode/
+*.iml
+
+# Python 可再生产物
+__pycache__/
+*.pyc
+*.pyo
+
+# 日志与临时产物
+*.log
+*.tmp
+*.bak
