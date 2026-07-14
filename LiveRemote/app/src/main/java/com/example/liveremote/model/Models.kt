@@ -36,6 +36,8 @@ data class AppState(
     // —— 窗口 ——
     val studioVisible: Boolean = true,
     val playerVisible: Boolean = false,
+    val pitchVisible: Boolean = true,   // 音准线显隐(遥控页开关,后端缓存)
+    val setlistVisible: Boolean = true, // 顶端滚动歌单显隐(遥控页开关,后端缓存)
     val libCount: Int = 0,
 ) {
     val keyLabel: String get() = when {

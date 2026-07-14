@@ -76,7 +76,7 @@ pc-service 现在也是**电脑端 K歌中枢**(总体方案见根 [`../KARAOKE_
 - **自动曲库导入器**:`library.py` 后台线程监听 `D:\WeSingCache\WeSingDL\Res`(WeSing 缓存 LRU 只留几首),把四文件齐全且写完的歌拷进 `D:\KaraokeLibrary\<mid>\` + 解 QRC 写 `meta.json`,维护 `library.json`。启动 backfill 全量补齐,之后持续监听。**每首入库成功弹系统通知**(托盘气泡 `Shell_NotifyIcon`,跨线程安全):`《歌名 - 歌手》已入库,曲库现有 N 首`;`--headless` 无托盘时跳过。
   - **歌名清洗 + 手动改名**:歌名取自 QRC 的 `[ti:]`,但 WeSing 对 KTV/用户上传版本常填脏(带 `-歌手-ktv` 后缀,甚至整段是内部数字ID如成都的 `2422569`)。干净歌名只在 `KSongsDataInfo.dat`,但那是 AES 级强加密(解不动,见 DEV_LOG)。故:①`_clean_title` 去后缀/版本括号救回带垃圾后缀的(`鼓楼-赵雷-ktv`→`鼓楼`);②`_is_junk_title` 判纯数字/空标题为救不回,标 `needs_name=True`,入库通知提示"点此改名";③启动 `_remigrate` 用新规则重刷旧条目(幂等,**跳过 `named` 手动命名的不覆盖**)。
   - **改名入口**:**每首入库通知都可点**——点气泡即弹该歌的两栏(歌名/歌手)编辑框(`_last_import_mid` 记当前通知对应的歌,不再串到上一首);或点托盘"曲库"项打开**曲库管理窗**。保存走 `library.rename()`(更新 `library.json`+`meta.json`+内存清单,标 `named=True`,刷托盘+推手机)。
-- **托盘**:pystray 菜单 = `遥控地址`、`Studio One MIDI`、`曲库: N 首 — 点击管理`(**可点击**→ 曲库管理窗:tkinter 滚动帧(Canvas+右侧滚动条)按入库时间**倒序**列全部歌、搜索框实时过滤歌名/歌手,**每行独立 Frame:斑马纹交替底色 + 悬停高亮 + 点击/播放选中态**(纯 tk 手动画,无 Treeview),**行末带"编辑"/"播放"按钮**——编辑=改歌名歌手,播放=`k_play_mid` 立即 load+play(**有歌在播则切歌**,静默不弹窗),待命名歌名标红)、`K歌歌词`(显隐勾选)、`退出`。**"退出"会先弹 Windows 确认框(是/否)**,防误点——退出不可逆(服务、子进程、监听全收尾)。
+- **托盘**:pystray 菜单 = `遥控地址`、`Studio One MIDI`、`曲库: N 首 — 点击管理`(**可点击**→ 曲库管理窗:tkinter 滚动帧(Canvas+右侧滚动条)按入库时间**倒序**列全部歌、搜索框实时过滤歌名/歌手,**每行独立 Frame:斑马纹交替底色 + 悬停高亮 + 点击/播放选中态**(纯 tk 手动画,无 Treeview),**行首"勾选框"=加入歌单**(默认不选中;选中的歌进播放器顶端滚动字幕),**行末带"编辑"/"播放"按钮**——编辑=改歌名歌手,播放=`k_play_mid` 立即 load+play(**有歌在播则切歌**,静默不弹窗),待命名歌名标红)、`K歌歌词`(显隐勾选)、`退出`。**"退出"会先弹 Windows 确认框(是/否)**,防误点——退出不可逆(服务、子进程、监听全收尾)。
   - **托盘刷新踩坑(重要)**:pystray-win32 右键弹的是**缓存的菜单句柄,不会在打开时重新求值动态 lambda**——菜单文字只在 `update_menu()` 被调时才刷新,而 `update_menu` **只能在托盘线程调**(跨线程改 Win32 菜单会崩)。所以非托盘线程(曲库监听/播放器 reader)的变化**曾永远不刷新**(旧代码"下次打开自动刷新"的假设是错的)。修:`refresh_tray()` 非托盘线程时 `PostMessage(WM_TRAY_REFRESH)` 唤醒托盘线程去 `update_menu`;气泡点击(`NIN_BALLOONUSERCLICK`)也经包裹的 `WM_NOTIFY` handler 在托盘线程分发到改名框。
   - **改名对话框/曲库窗都用 tkinter,在独立线程跑各自 mainloop**——绝不阻塞托盘消息泵(同"退出"确认框教训:在托盘回调里开模态框会占死消息泵)。曲库窗用单 Tk 根 + 子 Toplevel 编辑(同根同线程稳);通知改名框各自独立根。
 - 配置见 `config.py`(`PLAYER_DEVICE`/`WESING_RES_DIR`/`KARAOKE_LIBRARY_DIR` 等)。
@@ -109,9 +109,16 @@ pc-service 把播放器 IPC 接进 WebSocket,并加曲库列表/点歌队列(供
   `_player_reader` 解析播放器 `STATE`,检测到当前歌播放结束(`pos≥dur-800` 且由播转停)→ `k_advance_paused()`
   只 `load` 队列下一首(归位到 0、暂停,等主播手动开唱);队列空则清空当前曲(`now=null`)。歌曲间歇 BGM
   由手机端"演唱↔BGM 联动"自动恢复。手动 `kqueue_next` 仍立即开唱。
-- **跨重启持久缓存**:声卡场景 + 通道静音记录 + 演唱音量 + **Studio One 显隐状态**存
-  `pc-service/state_cache.json`(gitignore),变更即原子写盘,服务重启时恢复(静音记录只恢复不发 MIDI;
-  `k_vol` 在拉起播放器后下发一次;`studio_visible` 恢复时若上次是隐藏则重新 `hide()`,可见则不动免抢焦点)。
-  App 连接首帧以后端 `k_vol` 为准反向同步手机媒体音量。
+- **跨重启持久缓存**:声卡场景 + 通道静音记录 + 演唱音量 + **Studio One 显隐** + **音准线显隐** + **歌词字体**
+  + **顶端歌单(内容/显隐/位置)**存 `pc-service/state_cache.json`(gitignore),变更即原子写盘,服务重启时恢复
+  (静音记录只恢复不发 MIDI;`k_vol`/`pitch_visible`/`k_font`/`setlist*` 在拉起播放器后下发一次
+  (`vol`/`pitch`/`font`/`setlist`/`setlist_show`/`setlist_y`);`studio_visible` 恢复时若上次是隐藏则重新
+  `hide()`,可见则不动免抢焦点)。App 连接首帧以后端 `k_vol` 为准反向同步手机媒体音量。
+- **顶端滚动歌单**:曲库管理页勾选框把歌加入 `STATE["setlist"]`(mid 列表),`set_setlist_member` 更新+存盘+
+  `_push_setlist`(mid→歌名 JSON)推给播放器顶端滚动字幕;播放器 `O`(显隐)/`Ctrl+↑↓`(位置)经 STATE 回读
+  写盘。仅曲库页勾选 + 播放器键盘,无手机 UI。
+- **音准线显隐遥控**:WS `{"cmd":"pitch_toggle"}` → pc-service 翻转 `STATE["pitch_visible"]`、发 `pitch 0/1`
+  给播放器、存盘、广播;手机遥控页"窗口开关"区在"K歌歌词"下加了"音准线 显示/隐藏"开关(pc-service 对音准线
+  是权威源,不从播放器 STATE 回读,避免启动竞态)。
 - **伴奏音量走感知曲线**:手机媒体音量%→伴奏增益用**平方曲线**(增益=（%/100)²,见 karaoke-player
   `audio_engine._gain_for`),低档位真正变小(最小档由线性 -23dB 降到 -46dB)、控制更细。

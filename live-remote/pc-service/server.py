@@ -71,11 +71,16 @@ STATE = {
     "bgm_playing": True,       # 播放状态(渐变方向 + 进度条;假定启动时在播)
     "studio_visible": True,    # Studio One 窗口是否显示
     "player_visible": False,   # K歌歌词窗口是否显示(初始隐藏,由服务器托管)
+    "pitch_visible": True,     # 音准线是否显示(手机遥控 + 跨重启缓存)
     "lib_count": 0,            # 曲库已入库首数
     "watcher_running": False,  # 曲库监听线程是否在跑
     # ── K歌播放器状态(来自播放器 stdout 的 STATE 上报)──
     "k_playing": False, "k_pos": 0, "k_dur": 0, "k_key": 0, "k_vocal": False,
     "k_vol": 100,              # 伴奏音量 0-100(手机音量键同步)
+    "k_font": 0,               # 歌词字体索引(播放器 Q 键循环,跨重启缓存)
+    "setlist": [],             # 歌单 mid 列表(曲库管理页勾选,跨重启缓存;推给播放器顶端滚动字幕)
+    "setlist_visible": True,   # 顶端歌单显隐(播放器 O 键,跨重启缓存)
+    "setlist_y": 24,           # 顶端歌单竖直位置(播放器 Ctrl+↑↓,跨重启缓存)
     "k_mid": "", "k_title": "", "k_artist": "",
     "now": None,               # 正在唱 {mid,title,artist} 或 None(空闲)
     "queue": [],               # 等待队列 [{mid,title,artist}...]
@@ -123,6 +128,11 @@ def _save_persist():
                 "mute_state": {str(k): bool(v) for k, v in _mute_state.items()},
                 "k_vol": int(STATE.get("k_vol", 100)),
                 "studio_visible": bool(STATE.get("studio_visible", True)),
+                "pitch_visible": bool(STATE.get("pitch_visible", True)),
+                "k_font": int(STATE.get("k_font", 0)),
+                "setlist": list(STATE.get("setlist", [])),
+                "setlist_visible": bool(STATE.get("setlist_visible", True)),
+                "setlist_y": int(STATE.get("setlist_y", 24)),
             }
             tmp = PERSIST_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -161,8 +171,25 @@ def _restore_persist():
                 studio_win.hide()
             except Exception:
                 pass
+    if data.get("pitch_visible") is not None:
+        STATE["pitch_visible"] = bool(data["pitch_visible"])   # 播放器拉起后统一下发,见 start_player
+    if data.get("k_font") is not None:
+        try:
+            STATE["k_font"] = int(data["k_font"])              # 播放器拉起后统一下发
+        except Exception:
+            pass
+    if isinstance(data.get("setlist"), list):
+        STATE["setlist"] = [str(m) for m in data["setlist"]]
+    if data.get("setlist_visible") is not None:
+        STATE["setlist_visible"] = bool(data["setlist_visible"])
+    if data.get("setlist_y") is not None:
+        try:
+            STATE["setlist_y"] = int(data["setlist_y"])
+        except Exception:
+            pass
     print(f"[PERSIST] 已恢复: scene={STATE['scene']} k_vol={STATE['k_vol']} "
-          f"studio_visible={STATE['studio_visible']} mute={_mute_state}")
+          f"studio_visible={STATE['studio_visible']} pitch_visible={STATE['pitch_visible']} "
+          f"mute={_mute_state}")
 
 
 def reset_mute_state():
@@ -634,6 +661,16 @@ async def _handle_cmd(data):
                 _save_persist()
     elif cmd == "player_toggle":
         toggle_player()
+    elif cmd == "pitch_toggle":
+        v = not STATE.get("pitch_visible", True)
+        STATE["pitch_visible"] = v
+        _player_send("pitch " + ("1" if v else "0"))
+        _save_persist()          # 音准线显隐跨重启持久(同场景/音量/Studio显隐)
+    elif cmd == "setlist_toggle":
+        v = not STATE.get("setlist_visible", True)
+        STATE["setlist_visible"] = v
+        _player_send("setlist_show " + ("1" if v else "0"))
+        _save_persist()          # 顶端歌单显隐跨重启持久(同 O 键回读那套)
     # ── K歌:点歌队列 + 播放控制 ──
     elif cmd == "kqueue_add":
         k_enqueue(data.get("mid"))
@@ -784,13 +821,26 @@ def _player_reader(proc):
                 except Exception:
                     continue
                 vol_before = STATE.get("k_vol")
+                pitch_before = STATE.get("pitch_visible")
+                font_before = STATE.get("k_font")
+                slv_before = STATE.get("setlist_visible")
+                sly_before = STATE.get("setlist_y")
                 STATE.update({
                     "k_pos": st["pos"], "k_dur": st["dur"], "k_playing": st["playing"],
                     "k_key": st["key"], "k_vocal": st["vocal"], "k_mid": st["mid"],
                     "k_vol": st.get("vol", STATE.get("k_vol", 100)),
+                    # 回读音准线/字体/歌单显隐+位置:让播放器 P/Q/O/Ctrl+↑↓ 也同步缓存(同 key/vocal)
+                    "pitch_visible": st.get("pitch", STATE.get("pitch_visible", True)),
+                    "k_font": st.get("font", STATE.get("k_font", 0)),
+                    "setlist_visible": st.get("setlist_show", STATE.get("setlist_visible", True)),
+                    "setlist_y": st.get("setlist_y", STATE.get("setlist_y", 24)),
                     "k_title": st["title"], "k_artist": st["artist"],
                 })
-                if STATE.get("k_vol") != vol_before:   # 音量有变才写盘(上报每 500ms 一次)
+                if (STATE.get("k_vol") != vol_before                # 有变才写盘(上报每 500ms 一次)
+                        or STATE.get("pitch_visible") != pitch_before
+                        or STATE.get("k_font") != font_before
+                        or STATE.get("setlist_visible") != slv_before
+                        or STATE.get("setlist_y") != sly_before):
                     _save_persist()
                 # 结束检测:曾在播、现在停、且已到尾 → 切到下一首**开头并暂停**(不自动开唱)。
                 # 只在"结束的正是当前曲"时才自动切,避免与手动切歌(事件循环线程)撞车导致跳一首。
@@ -823,8 +873,13 @@ def start_player():
         )
         STATE["player_visible"] = False
         threading.Thread(target=_player_reader, args=(_player_proc,), daemon=True).start()
-        # 播放器默认音量 100,把持久缓存里的演唱音量下发过去(重启继承)
+        # 把持久缓存里的演唱音量、音准线显隐、歌词字体、顶端歌单下发过去(重启继承播放器默认值)
         _player_send("vol " + str(int(STATE.get("k_vol", 100))))
+        _player_send("pitch " + ("1" if STATE.get("pitch_visible", True) else "0"))
+        _player_send("font " + str(int(STATE.get("k_font", 0))))
+        _player_send("setlist_show " + ("1" if STATE.get("setlist_visible", True) else "0"))
+        _player_send("setlist_y " + str(int(STATE.get("setlist_y", 24))))
+        _push_setlist()          # 歌单内容(据缓存的 mid 列表 → 歌名)
         print("[PLAYER] 已拉起 K歌播放器(隐藏)")
     except Exception as e:
         print(f"[PLAYER] 启动失败: {e}")
@@ -881,9 +936,10 @@ def _threadsafe_broadcast():
 
 
 def _on_lib_change():
-    """曲库变化:刷托盘 + 推手机(手机据此重拉曲库列表)。"""
+    """曲库变化:刷托盘 + 推手机 + 重推歌单(歌名可能被迁移修正,或新歌入库)。"""
     refresh_tray()
     _threadsafe_broadcast()
+    _push_setlist()
 
 
 def _on_lib_import(mid, meta, count):
@@ -938,6 +994,29 @@ def _build_edit_form(container, mid, on_saved):
     container.after(100, lambda: (e_t.focus_set(),))
 
 
+def _push_setlist():
+    """把歌单(mid→歌名)推给播放器顶端滚动字幕。曲库勾选变化 / 播放器拉起时调。"""
+    titles = []
+    for m in STATE.get("setlist", []):
+        t = (library.song_meta(m) or {}).get("title", "").strip()
+        if t:
+            titles.append(t)
+    _player_send("setlist " + json.dumps(titles, ensure_ascii=False))
+
+
+def set_setlist_member(mid, on):
+    """曲库管理页勾选/取消一首歌进歌单:更新 STATE + 存盘 + 推播放器。"""
+    sl = list(STATE.get("setlist", []))
+    if on and mid not in sl:
+        sl.append(mid)
+    elif not on and mid in sl:
+        sl.remove(mid)
+    STATE["setlist"] = sl
+    _save_persist()
+    _push_setlist()
+    _threadsafe_broadcast()
+
+
 def _open_rename_dialog(mid):
     """点通知气泡 → 独立窗口改一首歌名。tkinter 在**独立线程**跑自己的 mainloop——绝不阻塞托盘
     消息泵(同 do_quit 教训:在托盘回调里开模态框会占死消息泵)。"""
@@ -980,6 +1059,9 @@ def _open_library_browser():
             tk.Entry(top, textvariable=q).pack(side="left", fill="x", expand=True, padx=6)
             count_var = tk.StringVar()
             tk.Label(top, textvariable=count_var).pack(side="left")
+
+            tk.Label(root, text="☑ 勾选 = 加入歌单(播放器顶端滚动显示)", anchor="w",
+                     fg="#888888").pack(fill="x", padx=12)
 
             # 列表区:Canvas + 内嵌 Frame + 右侧滚动条(为了每行放真按钮,不用 Treeview)
             body = tk.Frame(root)
@@ -1040,32 +1122,39 @@ def _open_library_browser():
                     base = C_EVEN if shown % 2 == 0 else C_ODD
                     rf = tk.Frame(inner, bg=base)
                     rf.pack(fill="x")
-                    rf.columnconfigure(0, weight=1, minsize=170)   # 歌名列伸缩
+                    rf.columnconfigure(1, weight=1, minsize=160)   # 歌名列伸缩(col1)
+                    # col0:勾选框 = 加入歌单(默认按 STATE["setlist"];顶端滚动字幕)
+                    var = tk.BooleanVar(value=(mid in STATE.get("setlist", [])))
+                    chk = tk.Checkbutton(
+                        rf, variable=var, bg=base, activebackground=base,
+                        command=lambda mid=mid, var=var: set_setlist_member(mid, var.get()))
+                    chk.grid(row=0, column=0, padx=(6, 0))
                     name_fg = "#c0392b" if m.get("needs_name") else "#111111"
                     l_name = tk.Label(rf, text=title or "(待命名)", anchor="w",
-                                      bg=base, fg=name_fg, padx=10, pady=7)
-                    l_name.grid(row=0, column=0, sticky="w")
-                    l_art = tk.Label(rf, text=artist, anchor="w", width=12,
+                                      bg=base, fg=name_fg, padx=8, pady=7)
+                    l_name.grid(row=0, column=1, sticky="w")
+                    l_art = tk.Label(rf, text=artist, anchor="w", width=11,
                                      bg=base, fg="#333333")
-                    l_art.grid(row=0, column=1, sticky="w", padx=4)
-                    l_time = tk.Label(rf, text=tstr, anchor="w", width=12,
+                    l_art.grid(row=0, column=2, sticky="w", padx=4)
+                    l_time = tk.Label(rf, text=tstr, anchor="w", width=11,
                                       bg=base, fg="#999999")
-                    l_time.grid(row=0, column=2, sticky="w", padx=4)
+                    l_time.grid(row=0, column=3, sticky="w", padx=4)
                     tk.Button(rf, text="编辑", width=5,
                               command=lambda mid=mid: _edit(mid)).grid(
-                        row=0, column=3, padx=(6, 2), pady=3)
+                        row=0, column=4, padx=(6, 2), pady=3)
                     tk.Button(rf, text="播放", width=5,
                               command=lambda mid=mid: _play(mid)).grid(
-                        row=0, column=4, padx=(2, 8), pady=3)
+                        row=0, column=5, padx=(2, 8), pady=3)
                     cells = (l_name, l_art, l_time)
 
-                    def _mk_paint(rf=rf, cells=cells, base=base, mid=mid):
+                    def _mk_paint(rf=rf, cells=cells, chk=chk, base=base, mid=mid):
                         def paint(hover=False):
                             c = (C_SEL if sel["mid"] == mid
                                  else (C_HOVER if hover else base))
                             rf.configure(bg=c)
                             for lb in cells:
                                 lb.configure(bg=c)
+                            chk.configure(bg=c, activebackground=c)
                         return paint
 
                     paint = _mk_paint()
@@ -1073,6 +1162,8 @@ def _open_library_browser():
                         w.bind("<Enter>", lambda e, p=paint: p(True))
                         w.bind("<Leave>", lambda e, p=paint: p(False))
                         w.bind("<Button-1>", lambda e, mid=mid: _select(mid))
+                    chk.bind("<Enter>", lambda e, p=paint: p(True))   # 勾选框上也保持悬停色
+                    chk.bind("<Leave>", lambda e, p=paint: p(False))
                     rows.append({"paint": paint, "mid": mid})
                     shown += 1
                 count_var.set(f"共 {shown} 首")

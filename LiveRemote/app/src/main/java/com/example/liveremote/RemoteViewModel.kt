@@ -127,6 +127,8 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             bgmDur = j.optInt("bgm_dur", old.bgmDur),
             studioVisible = j.optBoolean("studio_visible", old.studioVisible),
             playerVisible = j.optBoolean("player_visible", old.playerVisible),
+            pitchVisible = j.optBoolean("pitch_visible", old.pitchVisible),
+            setlistVisible = j.optBoolean("setlist_visible", old.setlistVisible),
             libCount = j.optInt("lib_count", old.libCount),
         )
         _state.value = ns
@@ -270,6 +272,8 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     // ───────────────────────── 窗口开关 ─────────────────────────
     fun toggleStudio() = Unit.also { client.send("cmd" to "studio_toggle") }
     fun togglePlayerWindow() = Unit.also { client.send("cmd" to "player_toggle") }
+    fun togglePitch() = Unit.also { client.send("cmd" to "pitch_toggle") }
+    fun toggleSetlist() = Unit.also { client.send("cmd" to "setlist_toggle") }
 
     override fun onCleared() { client.disconnect() }
 }

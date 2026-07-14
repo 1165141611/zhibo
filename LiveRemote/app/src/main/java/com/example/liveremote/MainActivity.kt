@@ -156,6 +156,7 @@ private fun App(vm: RemoteViewModel) {
                         onScene = vm::setScene, onReset = vm::resetScene,
                         onBgmPrev = vm::bgmPrev, onBgmToggle = vm::bgmToggle, onBgmNext = vm::bgmNext, onVol = vm::setVolume,
                         onStudio = vm::toggleStudio, onPlayerWin = vm::togglePlayerWindow,
+                        onPitch = vm::togglePitch, onSetlist = vm::toggleSetlist,
                         onOpenSettings = { showSettings = true },
                     )
                 }

@@ -394,3 +394,70 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
     每行独立 `Frame`(斑马纹交替底色 #fff/#f4f5f7)+ 悬停高亮(#eaf1fb)+ 点击/播放选中态(#c8e0f8)。
     每行绑 `<Enter>/<Leave>/<Button-1>` 到行框+各格 Label,`paint(hover)` 按"选中>悬停>底色"重着色;
     `sel["mid"]` 跨搜索保留。列用行内 grid(列0 `weight=1 minsize=170` 伸缩)保证跨行对齐。截图确认三态清晰。
+- **音准线显隐遥控 + 缓存(四层打通)**(2026-07-14,作者要求):
+  - **播放器** `player.py`:加 `self.show_pitch`(默认 True),`paintEvent` 用它守卫 `_draw_pitch`;stdin 加
+    `pitch 0|1` 命令;STATE 上报加 `pitch`。渲染实测:`show_pitch=False` 时音准带消失、歌词不受影响。
+  - **pc-service** `server.py`:`STATE["pitch_visible"]`;WS `pitch_toggle` → 翻转 + `_player_send("pitch …")`
+    + `_save_persist` +(`_handle_cmd` 末尾统一)广播;`_save_persist/_restore_persist` 加 `pitch_visible`;
+    `start_player` 拉起后随 `vol` 一起下发 `pitch`(重启继承)。**`_player_reader` 回读 `st["pitch"]`**(同
+    key/vocal/vol 的回读模式,有变即 `_save_persist`)——这样播放器 `P` 键切换也同步到手机(见下条快捷键)。
+  - **手机 App**:`AppState.pitchVisible`、`parseState` 读 `pitch_visible`、`RemoteViewModel.togglePitch()`
+    发 `pitch_toggle`、`RemoteScreen` "窗口开关"区在"K歌歌词"下加 `WindowRow("音准线 显示/隐藏", …)`。
+  - **验证**:WS 端到端(`websockets` 客户端)——初值 True → `pitch_toggle` 广播翻 False + `state_cache.json`
+    落 False → 再 toggle 切回 True,全 OK;Kotlin `:app:compileDebugKotlin` + `assembleDebug` BUILD SUCCESSFUL
+    (APK 10.1MB)。**手机当前未连(USB/无线/mDNS 均无设备),APK 已出待装。**
+- **播放器右下角快捷键提示 + `P` 键音准线 + 确认手机演唱页音准线独立**(2026-07-14,承上):
+  - `player.py` 加 `P` 键 → `show_pitch` 翻转(经 STATE 回读同步手机);`paintEvent` 加 `_draw_hotkeys`——
+    右下角画 `←→ 步退/进   ↑↓ 升降调   R 原唱/伴奏   P 音准线`,与左下 `_draw_status` **同款**
+    (font_status 11pt + 白字黑描边 ow=3),静态文案建一次 pixmap 缓存(DPR 变时清)。`win.grab()` 裁底条
+    截图确认:左下播放信息、右下快捷键提示两条对齐同款。
+  - **确认手机演唱页音准线不受电脑端影响**:`SingScreen` 用 `KaraokeStage(...)` 画音准线,只依赖 `lyrics.notes`,
+    **完全不引用 `pitchVisible`**(该字段只用于遥控页开关)。故手机演唱页音准线**始终显示**,与电脑端 `pitch_visible`
+    无关——无需改代码,查证即结论。
+- **音准块描边淡化**(2026-07-14,作者反馈"边线又粗又黑、手机屏缩小后像黑线条"):`_draw_pitch` 的音准块
+  描边由 `黑(0,0,0)/2px` 改为 `深蓝灰(45,55,70)/1px`——仍非绿够暗(绿幕抠图的边缘缓冲照样干净),但细一半、
+  颜色柔和,缩到手机屏不再是刺眼粗黑线。只动音准块;歌词(ow=5)/圆点的黑描边不变(文字要粗描边才清晰)。
+  放大 3× 截图确认:音准块变成很淡的细边。
+- **音准块加粗 20% + 歌词黑边改 1px**(2026-07-14,作者要求):`_draw_pitch` 的 `bar_h` 6→7.2(≈+20%);
+  逐字歌词 base/hi(`_word_entry`/`_draw_word_line`)与前奏歌名(`_draw_plain_line`)的黑描边 5/4px→`1px`
+  (base 与 hi 必须同宽,否则高亮盖不齐)。状态栏/快捷键(3px)、圆点(2px)不动。截图确认歌词清爽、音准略粗。
+- **音准块染色改为"同歌词"由白染蓝**(2026-07-14,作者反馈"颜色反了"):原来 active 块青底、已唱部分填白
+  (=已唱变白),反了。改为:每块**底白**(245,245,245)+描边,**播放头左侧(已唱)裁出染蓝**(80,220,255,
+  同歌词高亮),右侧留白;跨播放头那块正好左蓝右白,随乐由白染蓝。删掉旧的 active/pr 分支。
+- **歌词字体 Q 键循环 + 缓存**(2026-07-14,作者选定 7 款):`player.py` 加 `FONTS` 列表[(名,族,是否加粗)]
+  =微软雅黑/黑体/思源黑Black/思源黑Medium/思源宋/思源宋Black/楷体(bold 位与选字示例一致:名含 Black/Medium
+  的不叠粗);`_apply_font(idx)` 换 font_big/small、重算 `_line_h`、清文字缓存(旧字体 pixmap 作废),`__init__`
+  改为 `font_idx=0` + `_apply_font(0)`;`Q` 键循环 + `_flash_status` 左下角提示当前字体名(2s);IPC `font <idx>`;
+  STATE 上报加 `font`。**pc-service**:`STATE["k_font"]`;`_save_persist/_restore_persist` 加 `k_font`;`start_player`
+  随 vol/pitch 下发 `font`;`_player_reader` 回读 `st["font"]`(Q 键切换即缓存,同 pitch)。**验证**:7 款逐个
+  `_apply_font` 渲染截图全 OK(青高亮+白染);WS state 含 `k_font`;持久化往返 save/restore k_font=6 通过。
+  仅键盘快捷键,未加手机 UI(作者只要 Q 键)。
+- **歌单勾选 + 顶端滚动字幕 + 布局下移 + O/Ctrl↑↓**(2026-07-14,作者四点需求):
+  1. **曲库管理页加勾选框列**:每行 col0 加 `tk.Checkbutton`(默认按 `STATE["setlist"]`),`command` 调
+     `set_setlist_member(mid, on)`(更新 STATE + `_save_persist` + `_push_setlist` 推播放器 + 广播)。**坑**:
+     `BooleanVar` 必须被 `command` 的 `var=var` 默认参数引用住,否则被 GC → 勾选态丢(渲染测试脚本没引用就白框)。
+  2. **播放器顶端横向循环滚动歌单**(`_draw_setlist`):只歌名、空格分隔、无序号无歌手;`_make_line_pixmap` 建
+     一张 pixmap(尾部补空格接头无缝),`time.monotonic()*speed % period` 平铺两份滚。内容经 IPC `setlist <json>`
+     从 pc-service(据勾选 `_push_setlist`)推来。**主题下移**:`_layout()` 把音准带+两行歌词底部锚定到状态栏上方。
+  3. **`Ctrl+↑↓` 移歌单**(`_move_setlist`):`keyPressEvent` 里 Up/Down 判 `ControlModifier` 分流(无修饰=升降调);
+     上界 0(不越窗顶)、下界 `pitch_top-歌单高`(不覆盖音轨,`_layout()` 算)。
+  4. **`O` 键歌单显隐** + 右下角快捷提示**改两行**(叠在状态栏上方,右对齐不与左下播放信息横向撞)含
+     `O 歌单`/`Ctrl+↑↓ 移歌单`。**缓存**:`STATE` 加 `setlist`/`setlist_visible`/`setlist_y`,save/restore + start
+     下发 + `_player_reader` 回读 `setlist_show`/`setlist_y`(同 pitch)。
+  **验证**:渲染截图——顶部滚动歌单(6首名)、中部留白、底部音轨+双行歌词、右下两行快捷键;Ctrl+↓到底=音轨顶-歌单高、
+  Ctrl+↑到顶=0;O 隐藏;曲库窗勾选框列渲染 OK;离线集成——勾选→STATE+推正确歌名+落盘、取消→移除、三字段持久化往返全过。
+- **竖屏 3:4 窗 + 歌单间距收窄 + 快捷提示底对齐**(2026-07-14,作者微调):①窗 `760×760`→`720×960`(3:4 竖屏,配
+  竖屏直播);②歌单分隔 `8 普通空格`→`两个全角空格`(≈两字间距);③`_draw_hotkeys` 底行 `base` 由 `h-26-fh` 改
+  `h-26`,与左下播放信息(`_draw_status`,也 h-26)**同底对齐**(右对齐,长度下二者不横向撞)。截图确认三点 OK。
+- **修:歌单启动不显示(竞态)**(2026-07-14,作者反馈"不显示滚动歌单"):`library.start()` 原来只 spawn 后台
+  worker **异步**载 `_MANIFEST`,而 `main()` 紧接着 `start_player()`→`_push_setlist()` 取歌名,此刻 manifest 可能
+  还没载完 → `song_meta` 全 None → 推空歌单 → 播放器顶端无字幕。**修**:`_MANIFEST = _load_manifest()` 挪到
+  `start()` **同步**先载完再返回(小 json,快),`_remigrate`(读 QRC 慢)仍留 worker 后台;并给 `_on_lib_change`
+  加 `_push_setlist()`(迁移修正歌名/新歌入库后重推)。**验证**:`start()` 返回后 `song_meta` 立即取到 45 首名;
+  重启后经 WS 显示托管播放器,顶端滚动歌单正常出现。
+- **手机遥控页加"滚动歌单 显示/隐藏"开关**(2026-07-14,作者要求,放"K歌歌词"上方):`server.py` 加 WS
+  `setlist_toggle`(翻转 `STATE["setlist_visible"]` + `_player_send("setlist_show …")` + 存盘;`_broadcast` 发整个
+  STATE 故 `setlist_visible` 已在广播里)。App:`AppState.setlistVisible`、`parseState` 读 `setlist_visible`、
+  `RemoteViewModel.toggleSetlist()`、`RemoteScreen` "窗口开关"区顺序 Studio One → **滚动歌单** → K歌歌词 → 音准线。
+  **验证**:WS 端到端 `setlist_toggle` 翻转+落盘+切回全过;`assembleDebug` BUILD SUCCESSFUL。**手机当前离线
+  (adb 192.168.1.6:5555 offline),APK 已出待装。**

@@ -243,8 +243,7 @@ def _remigrate(man):
 
 
 def _worker():
-    global _MANIFEST
-    _MANIFEST = _load_manifest()
+    # 迁移(读 QRC 慢)放后台,不阻塞启动;_MANIFEST 已在 start() 同步载好。
     try:
         _remigrate(_MANIFEST)     # 用新清洗规则修旧条目(幂等,跳过手动命名的)
     except Exception as e:
@@ -252,7 +251,7 @@ def _worker():
     if _state is not None:
         _state["lib_count"] = len(_MANIFEST)
     if _on_change:
-        _on_change()
+        _on_change()              # 迁移后回调(歌名已修正,server 侧会带修正名重推歌单)
     pending = {}
     while True:
         try:
@@ -270,7 +269,9 @@ def _worker():
 def start(state, on_change=None, on_import=None):
     """启动后台监听线程。state=server.STATE;on_change=曲库变化回调(刷托盘+推手机);
     on_import=单曲入库成功回调 (mid, meta, 库存数),供 server 弹系统通知。"""
-    global _state, _on_change, _on_import
+    global _state, _on_change, _on_import, _MANIFEST
     _state, _on_change, _on_import = state, on_change, on_import
+    _MANIFEST = _load_manifest()   # **同步载入**(小 json,快):确保随后 start_player 的
+    state["lib_count"] = len(_MANIFEST)   # _push_setlist 能立即取到歌名(修歌单启动为空的竞态)
     state["watcher_running"] = True
     threading.Thread(target=_worker, daemon=True).start()

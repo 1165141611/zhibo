@@ -56,6 +56,8 @@ fun RemoteScreen(
     onVol: (Int) -> Unit,
     onStudio: () -> Unit,
     onPlayerWin: () -> Unit,
+    onPitch: () -> Unit,
+    onSetlist: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
@@ -113,7 +115,9 @@ fun RemoteScreen(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(C.Card).border(1.dp, C.Stroke, RoundedCornerShape(16.dp)),
         ) {
             WindowRow("Studio One 显示/隐藏", st.studioVisible, onStudio, divider = true)
-            WindowRow("K歌歌词 显示/隐藏", st.playerVisible, onPlayerWin, divider = false)
+            WindowRow("滚动歌单 显示/隐藏", st.setlistVisible, onSetlist, divider = true)
+            WindowRow("K歌歌词 显示/隐藏", st.playerVisible, onPlayerWin, divider = true)
+            WindowRow("音准线 显示/隐藏", st.pitchVisible, onPitch, divider = false)
         }
       }
     }

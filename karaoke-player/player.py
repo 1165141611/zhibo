@@ -8,6 +8,10 @@ PC 播伴奏、自己当时钟 → 逐字高亮滚动歌词 + 原唱音高提示
   ← →   快退/快进 5 秒
   ↑ ↓   升/降调(半音,实时秒切)
   R     伴奏 / 原唱引导声 切换
+  P     音准线 显示 / 隐藏
+  Q     歌词字体 循环切换(缓存,重启保持)
+  O     顶端滚动歌单 显示 / 隐藏(缓存)
+  Ctrl+↑↓ 顶端歌单上下移动(上不越窗顶,下不覆盖音轨;缓存位置)
   B     背景模式切换(透明 / 洋红抠像 / 半透黑)
   ↑↓拖动 鼠标拖动窗口
   Esc   退出
@@ -59,6 +63,18 @@ class _Ctl(QtCore.QObject):
 
 class KaraokeWindow(QtWidgets.QWidget):
     BG_MODES = ["transparent", "chroma", "dark"]
+    # 歌词字体循环(Q 键切换,pc-service 缓存):(显示名, 字体族, 是否加粗)。
+    # bold=False 的是字体名已含字重(Black/Medium)的,不再叠加粗——与选字时的示例一致。
+    FONTS = [
+        ("微软雅黑", "Microsoft YaHei", True),
+        ("黑体", "SimHei", True),
+        ("思源黑Black", "Noto Sans SC Black", False),
+        ("思源黑Medium", "Noto Sans SC Medium", False),
+        ("思源宋", "Noto Serif SC", True),
+        ("思源宋Black", "Noto Serif SC Black", False),
+        ("楷体", "KaiTi", True),
+    ]
+    MARQUEE_SPEED = 45          # 顶端歌单滚动速度(像素/秒)
 
     def __init__(self, song: Song, publish_smtc=True, service_mode=False):
         super().__init__()
@@ -70,6 +86,11 @@ class KaraokeWindow(QtWidgets.QWidget):
         self.use_vocal = False
         self.semitone = 0
         self.bg_mode = 1                            # 默认绿幕抠图模式(纯绿背景+描边文字)
+        self.show_pitch = True                      # 音准线显隐(IPC `pitch 0/1` 控;pc-service 缓存)
+        self.show_setlist = True                    # 顶端滚动歌单显隐(O 键;同 P 一起缓存)
+        self.setlist_titles = []                    # 歌单歌名(pc-service 据曲库勾选推来)
+        self.setlist_y = 24                         # 歌单竖直位置(Ctrl+↑↓ 移动;缓存)
+        self._setlist_pix = None                    # 歌单滚动条 pixmap(内容/字体变时重建)
         self.blank = False                          # 空白态:只画全绿背景(隐藏歌词时用,捕获帧=纯绿)
         self.status_text = ""
         self._drag_pos = None
@@ -77,19 +98,19 @@ class KaraokeWindow(QtWidgets.QWidget):
         # 文字渲染缓存:整行预渲染成 QPixmap,每帧只 blit。不能每帧重建字形路径+描边
         # (那样一帧要 30ms+,GUI 线程占着 GIL,sounddevice 的 Python 回调抢不到 GIL
         #  → 设备缓冲(~46ms)耗尽 → 断续吱吱声,且只在窗口可见时出现)
-        self.font_big = QtGui.QFont("Microsoft YaHei", 30, QtGui.QFont.Bold)
-        self.font_small = QtGui.QFont("Microsoft YaHei", 20)
-        self.font_status = QtGui.QFont("Microsoft YaHei", 11)
-        self._line_h = QtGui.QFontMetrics(self.font_big).height()
+        self.font_status = QtGui.QFont("Microsoft YaHei", 11)   # 状态/快捷键固定雅黑,不随 Q 切换
         self._word_cache = {}    # (line.start, line.text) → 逐字行 base/hi 双 pixmap
         self._plain_cache = {}   # (text, 字号, 颜色) → 单 pixmap
         self._status_cache = None
+        self._hotkey_pix = None   # 右下角快捷键提示(静态文案,建一次缓存)
         self._cache_dpr = 0.0
+        self.font_idx = 0
+        self._apply_font(0)      # 设 font_big/font_small/_line_h(默认微软雅黑;pc-service 会按缓存下发)
         # 预热字体光栅化(一次性~0.1s,此刻音频流还没开):否则首帧画字要 150ms+,
         # 音频回调跟着被拖,窗口显示瞬间就是一声吱
         fm = QtGui.QFontMetrics(self.font_big)
         self._make_line_pixmap([("预热", fm.horizontalAdvance("预热"))],
-                               self.font_big, QtGui.QColor(0, 0, 0), 5)
+                               self.font_big, QtGui.QColor(0, 0, 0), 1)
 
         self.engine = AudioEngine(self.accompany, device=OUTPUT_DEVICE)
 
@@ -122,9 +143,30 @@ class KaraokeWindow(QtWidgets.QWidget):
         # 无边框(不置顶、不加 Qt.Tool;Tool 会导致不进任务栏/窗口捕获列表)
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        # 方形窗:字幕不强行铺满窗口,直播端绿幕抠图后手动裁剪即可(多余留白无所谓)
-        self.resize(760, 760)
+        # 竖屏 3:4 窗:配竖屏直播;字幕不强行铺满窗口,绿幕抠图后手动裁剪即可(多余留白无所谓)
+        self.resize(720, 960)
         self.setWindowTitle("KaraokePlayer")
+
+    def _apply_font(self, idx):
+        """切换歌词字体(font_big/small),重算行高,清文字缓存(旧字体 pixmap 作废)。
+        Q 键 / IPC `font <idx>` / 启动恢复都走这里。越界取模,安全。"""
+        idx %= len(self.FONTS)
+        self.font_idx = idx
+        _disp, fam, bold = self.FONTS[idx]
+        self.font_big = QtGui.QFont(fam, 30)
+        self.font_big.setBold(bold)
+        self.font_small = QtGui.QFont(fam, 20)
+        self.font_small.setBold(bold)
+        self._line_h = QtGui.QFontMetrics(self.font_big).height()
+        self._word_cache.clear()
+        self._plain_cache.clear()
+        self._setlist_pix = None        # 歌单用 font_small,字体变了要重建
+
+    def _flash_status(self, text, ms=2000):
+        """左下角状态栏临时提示(如切字体),ms 后若没被新提示替换则清掉。"""
+        self.status_text = text
+        QtCore.QTimer.singleShot(
+            ms, lambda: setattr(self, "status_text", "") if self.status_text == text else None)
 
     # ---------------------------------------------------- 绘制
     def paintEvent(self, e):
@@ -149,15 +191,70 @@ class KaraokeWindow(QtWidgets.QWidget):
             self._word_cache.clear()
             self._plain_cache.clear()
             self._status_cache = None
+            self._hotkey_pix = None
+            self._setlist_pix = None
 
         now = self.engine.current_ms()
-        lh = self._line_h
-        pitch_top = int(h * 0.24)
-        pitch_h = int(lh * 2)               # 音准区≤两行歌词高,扁平
-        self._draw_pitch(p, 0, pitch_top, w, pitch_h, now)
-        cy_top = pitch_top + pitch_h + int(lh * 1.6)   # 上行基准 y(其上留白给圆点)
+        pitch_top, pitch_h, cy_top = self._layout()
+        if self.show_pitch:                 # 音准线可显隐(手机遥控 + 缓存)
+            self._draw_pitch(p, 0, pitch_top, w, pitch_h, now)
         self._draw_lyrics(p, 0, cy_top, w, now)
+        if self.show_setlist:               # 顶端滚动歌单(O 键;下边界=音轨顶,不覆盖)
+            self._draw_setlist(p, w)
         self._draw_status(p, w, h, now)
+        self._draw_hotkeys(p, w, h)
+
+    def _layout(self):
+        """主题(音准带+两行歌词)底部锚定:落在最下方信息/快捷栏上方。返回 (pitch_top, pitch_h, cy_top)。"""
+        h = self.height()
+        lh = self._line_h
+        cy_top = (h - 26) - lh * 2.35        # 两行歌词(cy_bot=cy_top+1.15lh)落在状态栏上方
+        pitch_h = int(lh * 2)                # 音准区≤两行歌词高,扁平
+        pitch_top = int(cy_top - lh * 1.4 - pitch_h)   # 音准带在歌词上方,留圆点空间
+        return pitch_top, pitch_h, cy_top
+
+    def _setlist_entry(self):
+        """歌单滚动条:歌名用空格连接、尾部补空格(循环无缝)→ 一张 pixmap,内容/字体变时重建。"""
+        if self._setlist_pix is None:
+            if not self.setlist_titles:
+                return None
+            sep = "　　"            # 两个全角空格 ≈ 两个字间距
+            text = sep.join(self.setlist_titles) + sep
+            fm = QtGui.QFontMetrics(self.font_small)
+            total = fm.horizontalAdvance(text)
+            self._setlist_pix = (total, fm.height(),
+                                 self._make_line_pixmap([(text, total)], self.font_small,
+                                                        QtGui.QColor(245, 245, 245), 1))
+        return self._setlist_pix
+
+    def _setlist_h(self):
+        return QtGui.QFontMetrics(self.font_small).height() + 2 * self.PAD
+
+    def _draw_setlist(self, p, w):
+        """顶端横向循环滚动歌单(只歌名,空格分隔)。pixmap 平铺两份+裁剪,时钟驱动无缝滚。"""
+        ent = self._setlist_entry()
+        if not ent:
+            return
+        period, fh, pix = ent
+        y = self.setlist_y
+        off = (time.monotonic() * self.MARQUEE_SPEED) % period
+        p.save()
+        p.setClipRect(QtCore.QRectF(0, y, w, fh + 2 * self.PAD))
+        x = -off
+        while x < w:
+            p.drawPixmap(QtCore.QPointF(x - self.PAD, y), pix)
+            x += period
+        p.restore()
+
+    def set_setlist(self, titles):
+        self.setlist_titles = [str(t) for t in titles]
+        self._setlist_pix = None            # 重建
+
+    def _move_setlist(self, d):
+        """Ctrl+↑↓ 移歌单:上不越窗顶(0),下不覆盖音轨(音准带顶)。"""
+        pitch_top, _, _ = self._layout()
+        hi = max(0, pitch_top - self._setlist_h())
+        self.setlist_y = int(max(0, min(hi, self.setlist_y + d * 24)))
 
     def _tick_paint(self):
         """60fps 心跳:仅当窗口可见时才请求重绘。隐藏(服务托管默认态)时不排绘制,省 CPU。"""
@@ -181,28 +278,30 @@ class KaraokeWindow(QtWidgets.QWidget):
             p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255), 2))
             p.drawLine(int(playhead), int(y), int(playhead), int(y + h))
 
-        outline = QtGui.QPen(QtGui.QColor(0, 0, 0), 2)   # 黑描边,抠图干净
+        # 音准块描边:细 1px + 柔和深蓝灰(非纯黑)。仍非绿、够暗,绿幕能干净抠;但缩到手机屏
+        # 后不再是刺眼的粗黑线。(歌词/圆点的黑描边不动,只淡化音准线)
+        outline = QtGui.QPen(QtGui.QColor(45, 55, 70), 1)
+        white = QtGui.QColor(245, 245, 245)          # 未唱=白(同歌词底色)
+        blue = QtGui.QColor(80, 220, 255)            # 已唱=蓝(同歌词高亮)
+        bar_h = 7.2                                  # 比原 6 粗约 20%
         for n in self.song.notes:
             nx = playhead + (n.start - now) * ppms
             nw = max(3, n.dur * ppms)
             if nx + nw < x or nx > x + w:
                 continue
             ny = self._midi_to_y(n.midi, top, bh)
-            active = n.start <= now <= n.end
-            bar_h = 6
             rect = QtCore.QRectF(nx, ny - bar_h / 2, nw, bar_h)
+            # 像歌词:底色全白 + 描边;播放头左侧(已唱)裁出来染蓝
             p.setPen(outline)
-            if active:
-                p.setBrush(QtGui.QColor(80, 220, 255))       # 不透明青
-                p.drawRoundedRect(rect, 4, 4)
-                pr = float(np.clip((now - n.start) / max(1, n.dur), 0, 1))
+            p.setBrush(white)
+            p.drawRoundedRect(rect, 3, 3)
+            if nx < playhead:                        # 有已唱部分 → 染蓝到播放头
+                p.save()
+                p.setClipRect(QtCore.QRectF(nx, ny - bar_h / 2, playhead - nx, bar_h))
                 p.setPen(QtCore.Qt.NoPen)
-                p.setBrush(QtGui.QColor(255, 255, 255))
-                p.drawRoundedRect(QtCore.QRectF(nx, ny - bar_h / 2,
-                                                nw * pr, bar_h), 4, 4)
-            else:
-                p.setBrush(QtGui.QColor(120, 170, 210))      # 不透明蓝
-                p.drawRoundedRect(rect, 4, 4)
+                p.setBrush(blue)
+                p.drawRoundedRect(rect, 3, 3)
+                p.restore()
 
     # 引导圆点:仅前奏/长间奏出现(空档≥此值,单位ms);句间正常小停顿不显示
     GAP_FOR_DOTS = 8000
@@ -332,7 +431,7 @@ class KaraokeWindow(QtWidgets.QWidget):
                    "ascent": fm.ascent(),
                    "H": fm.height() + 2 * self.PAD,
                    "base": self._make_line_pixmap(words, font,
-                                                  QtGui.QColor(245, 245, 245), 5),
+                                                  QtGui.QColor(245, 245, 245), 1),
                    "hi": None, "font": font}
             self._word_cache[key] = ent
             while len(self._word_cache) > 8:     # 有界,防整首歌驻留(本机内存紧)
@@ -355,7 +454,7 @@ class KaraokeWindow(QtWidgets.QWidget):
         if hi > 0:      # 高亮版整行盖上,裁剪到进度线;两版描边一致,边界干净
             if ent["hi"] is None:
                 ent["hi"] = self._make_line_pixmap(ent["words"], ent["font"],
-                                                   QtGui.QColor(80, 220, 255), 5)
+                                                   QtGui.QColor(80, 220, 255), 1)
             p.save()
             p.setClipRect(QtCore.QRectF(left, top, self.PAD + hi, ent["H"]))
             p.drawPixmap(QtCore.QPointF(left, top), ent["hi"])
@@ -368,7 +467,7 @@ class KaraokeWindow(QtWidgets.QWidget):
             fm = QtGui.QFontMetrics(font)
             total = fm.horizontalAdvance(text)
             ent = {"total": total, "ascent": fm.ascent(),
-                   "pix": self._make_line_pixmap([(text, total)], font, col, 4)}
+                   "pix": self._make_line_pixmap([(text, total)], font, col, 1)}
             self._plain_cache[key] = ent
             while len(self._plain_cache) > 8:
                 del self._plain_cache[next(iter(self._plain_cache))]
@@ -395,6 +494,23 @@ class KaraokeWindow(QtWidgets.QWidget):
         p.drawPixmap(QtCore.QPointF(10 - self.PAD, h - 26 - self.PAD),
                      self._status_cache[1])
 
+    def _draw_hotkeys(self, p, w, h):
+        """右下角快捷键提示,与左下播放信息同款(font_status + 白字黑描边)。两行,叠在状态栏上方
+        (右对齐,不与左下播放信息横向撞)。静态文案,建一次缓存。"""
+        if self._hotkey_pix is None:
+            lines = ["←→ 步退/进   ↑↓ 升降调   R 原唱/伴奏",
+                     "P 音准线   Q 字体   O 歌单   Ctrl+↑↓ 移歌单"]
+            fm = QtGui.QFontMetrics(self.font_status)
+            self._hotkey_pix = [(fm.horizontalAdvance(s), self._make_line_pixmap(
+                [(s, fm.horizontalAdvance(s))], self.font_status,
+                QtGui.QColor(230, 230, 230), 3)) for s in lines]
+        fh = QtGui.QFontMetrics(self.font_status).height()
+        n = len(self._hotkey_pix)
+        base = h - 26               # 最下一行快捷键与左下播放信息同底,其余行叠其上
+        for i, (total, pix) in enumerate(self._hotkey_pix):
+            y = base - (n - 1 - i) * fh
+            p.drawPixmap(QtCore.QPointF(w - total - 10 - self.PAD, y - self.PAD), pix)
+
     # ---------------------------------------------------- 交互
     def keyPressEvent(self, e):
         k = e.key()
@@ -405,11 +521,24 @@ class KaraokeWindow(QtWidgets.QWidget):
         elif k == QtCore.Qt.Key_Right:
             self.engine.seek_ms(5000)
         elif k == QtCore.Qt.Key_Up:
-            self._change_key(self.semitone + 1)
+            if e.modifiers() & QtCore.Qt.ControlModifier:
+                self._move_setlist(-1)              # Ctrl+↑ 歌单上移
+            else:
+                self._change_key(self.semitone + 1)
         elif k == QtCore.Qt.Key_Down:
-            self._change_key(self.semitone - 1)
+            if e.modifiers() & QtCore.Qt.ControlModifier:
+                self._move_setlist(1)               # Ctrl+↓ 歌单下移
+            else:
+                self._change_key(self.semitone - 1)
         elif k == QtCore.Qt.Key_R:
             self._toggle_vocal()
+        elif k == QtCore.Qt.Key_P:
+            self.show_pitch = not self.show_pitch   # 音准线显隐(pc-service 经 STATE 回读同步手机)
+        elif k == QtCore.Qt.Key_O:
+            self.show_setlist = not self.show_setlist   # 顶端歌单显隐(pc-service 回读缓存,同 P)
+        elif k == QtCore.Qt.Key_Q:
+            self._apply_font(self.font_idx + 1)     # 循环切歌词字体(pc-service 经 STATE 回读缓存)
+            self._flash_status("字体: " + self.FONTS[self.font_idx][0])
         elif k == QtCore.Qt.Key_B:
             self.bg_mode = (self.bg_mode + 1) % len(self.BG_MODES)
         elif k == QtCore.Qt.Key_Escape:
@@ -499,7 +628,9 @@ class KaraokeWindow(QtWidgets.QWidget):
                   "dur": round(self.song.duration_ms()),
                   "playing": bool(self.engine.playing),
                   "key": self.semitone, "vocal": self.use_vocal,
-                  "vol": self.engine.volume_pct,
+                  "vol": self.engine.volume_pct, "pitch": self.show_pitch,
+                  "font": self.font_idx,
+                  "setlist_show": self.show_setlist, "setlist_y": self.setlist_y,
                   "mid": self.song.mid, "title": self.song.title,
                   "artist": self.song.artist}
             try:
@@ -638,6 +769,28 @@ def main():
             elif c == "vol" and arg is not None:
                 try:
                     win.engine.set_volume(int(arg))
+                except ValueError:
+                    pass
+            # 音准线显隐(手机遥控 + 缓存)
+            elif c == "pitch" and arg is not None:
+                win.show_pitch = (arg == "1")
+            # 歌词字体(Q 键循环 + pc-service 缓存恢复)
+            elif c == "font" and arg is not None:
+                try:
+                    win._apply_font(int(arg))
+                except ValueError:
+                    pass
+            # 顶端滚动歌单:内容(pc-service 据曲库勾选推来)/ 显隐 / 竖直位置
+            elif c == "setlist" and arg is not None:
+                try:
+                    win.set_setlist(json.loads(arg))
+                except Exception:
+                    pass
+            elif c == "setlist_show" and arg is not None:
+                win.show_setlist = (arg == "1")
+            elif c == "setlist_y" and arg is not None:
+                try:
+                    win.setlist_y = int(arg)
                 except ValueError:
                     pass
             # 父进程(pc-service)退出/崩溃 → stdin 关闭,本播放器自退,避免成为关不掉的孤儿

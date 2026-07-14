@@ -49,10 +49,14 @@
 
 ## 五、当前进展与下一步
 
-- **live-remote**:PC 服务(声卡场景 + QQ音乐 + 显隐窗口)已完成验证。**阶段一整合已接入**:自动曲库
-  导入器(`library.py`)、托管 K歌播放器子进程(`karaoke_win.py` 显隐)、托盘曲库数/监听状态、移除 scrcpy 投屏。
-- **LiveRemote**:安卓悬浮壳 + WebView 方案,开发中。
-- **karaoke-player**:单曲《吉姆餐厅》Demo 全通(歌词/音高/解密伴奏/实时升降调/绿幕)。下一步(K歌整合):
-  音频控制 API + 网页选歌队列 + 手机全屏 + 直播绿幕接入。**做 K歌 大功能前先读根 [KARAOKE_SYSTEM.md](KARAOKE_SYSTEM.md)。**
+- **live-remote**:PC 服务(声卡场景 + QQ音乐 + 显隐窗口)已完成。**K歌整合已全面接入并持续打磨**:自动曲库
+  导入器 + 托管 K歌播放器子进程 + 点歌队列/播放控制 WS API + **托盘曲库管理页(勾选加歌单/编辑歌名/播放切歌/搜索)**;
+  跨重启缓存(场景/音量/Studio显隐/音准线显隐/字体/歌单)存 `state_cache.json`。
+- **LiveRemote**:安卓原生 App(Compose,演唱/队列/遥控三页签),遥控页含声卡场景 + QQ音乐 + 窗口开关
+  (Studio One / K歌歌词 / 音准线显隐)。**注意:改了手机端功能需重新 `assembleDebug` + adb 装机才生效**。
+- **karaoke-player**:已从单曲 Demo 演进为多曲直播字幕源。**KTV 双行错开歌词 + 压扁音准线(均由白染蓝)**、
+  竖屏 3:4 窗、绿幕抠图、实时升降调、原唱/伴奏、`Q` 字体循环、`P` 音准线显隐、**`O`+`Ctrl+↑↓` 顶端滚动歌单**、
+  手机音量键同步(感知曲线)。热键/IPC/缓存详见 [karaoke-player/README.md](karaoke-player/README.md)。
+  **做 K歌 大功能前先读根 [KARAOKE_SYSTEM.md](KARAOKE_SYSTEM.md)。**
 
 > 更细的历史与踩坑记录在各子项目 README 及 `live-remote/DEV_LOG.md`。
