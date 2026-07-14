@@ -658,10 +658,20 @@ class KaraokeWindow(QtWidgets.QWidget):
         self.activateWindow()      # 取焦点,快捷键才生效
 
     def hide_lyrics(self):
-        """隐藏歌词:先把内容清成全绿(同步画一帧,让捕获冻结帧=纯绿),稍后再隐藏窗口。"""
+        """隐藏歌词:先把内容清成全绿(同步画一帧,让捕获冻结帧=纯绿),稍后隐藏并销毁原生窗口。"""
         self.blank = True
         self.repaint()             # 同步立刻画出全绿
-        QtCore.QTimer.singleShot(80, self.hide)   # 留几帧时间给直播伴侣抓到绿帧,再隐藏
+        QtCore.QTimer.singleShot(80, self._hide_and_release)   # 留几帧给直播伴侣抓到绿帧
+
+    def _hide_and_release(self):
+        """隐藏后销毁原生 HWND(Qt 对象和状态保留,下次 show() 自动重建窗口)。
+        本窗口是 WA_TranslucentBackground 的逐像素 alpha 分层窗口,实测只要它的 HWND
+        存在——哪怕 SW_HIDE 隐藏——ToDesk 远程会话里光标每移动一次,DWM 就要多做一次
+        全窗合成(dwm.exe +18~25% 单核,远端视频帧率骤降),表现为远程鼠标严重拖影卡顿;
+        普通 LWA_ALPHA 分层窗口无此问题。销毁 HWND 后开销归零;直播伴侣的窗口捕捉源
+        按标题匹配,重新 show 后会自动重挂。"""
+        self.hide()
+        self.destroy()
 
     def _report_vis(self, v):
         """服务模式下把可见性上报给 pc-service(stdout)。"""
@@ -725,10 +735,10 @@ def main():
           "| 行", len(song.lines), "音符", len(song.notes))
     win = KaraokeWindow(song, publish_smtc=not no_smtc, service_mode=hidden)
     if hidden:
-        # 服务模式:先完整 show 一次(建 HWND + 初始化绘制)再 hide,之后由 stdin 指令
-        # 用 Qt 自己 show/hide(才会正确重绘;外部 win32 SW_SHOW 不会触发 Qt 重绘)。
-        win.show()
-        win.hide()
+        # 服务模式:不预建窗口——原生 HWND 只在 show 时由 Qt 创建、hide 后销毁
+        # (见 _hide_and_release):这种逐像素 alpha 分层窗口只要存在(即使隐藏),
+        # ToDesk 远程会话里光标一动 DWM 就多合成一次 → 远程鼠标严重拖影。
+        # 显隐一律由 stdin 指令走 Qt 自己的 show/hide(外部 win32 SW_SHOW 不会触发 Qt 重绘)。
 
         def on_cmd(line):
             parts = line.split(None, 1)

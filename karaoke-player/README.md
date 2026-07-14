@@ -122,6 +122,17 @@
   (引擎自带锁,跨线程安全),`_loading_vocal` 防重入。60fps 重绘加 `isVisible()` 守卫,隐藏态不排绘制。
   同理 `load_song` 换歌的重解码若日后要提速,也只能后台做——但注意 pc-service 的 `load→show→play` 指令
   靠单线程 FIFO 保序,换歌若改异步须自行处理"加载完再 play"的时序。
+- **隐藏期间必须销毁原生 HWND,不能只 `hide()`**(2026-07-14 修"服务器一开,ToDesk 远程鼠标
+  严重拖影卡顿"):本窗口是 `WA_TranslucentBackground` 的**逐像素 alpha 分层窗口**,实测只要它的
+  HWND 存在——哪怕 `SW_HIDE` 完全隐藏、0 重绘——ToDesk 被控端**光标每移动一次,dwm.exe 就多做
+  一次全窗合成**(+18~25% 单核,ToDesk 视频输出码率跌 ~30% → 远端看鼠标拖影/滞后);光标不动则
+  无开销;普通 `LWA_ALPHA` 分层窗口或无窗口进程均不触发;与直播伴侣是否挂了窗口捕捉无关(改标题
+  照样触发)。修法:`hide_lyrics` 延迟 80ms 抓完绿帧后 `hide()+destroy()` 销毁原生窗口
+  (`_hide_and_release`),Qt 对象/状态保留,下次 `show()` 自动重建 HWND(标题不变,直播伴侣按
+  标题自动重挂);`--hidden` 启动也不再预建窗口(原 `show()+hide()` 舞步删除)。已验证:显隐循环
+  HWND 正确生灭、重建窗口渲染正常、播放跨显隐不断、dwm 开销回到基线。
+- **暂停时生产者线程降频轮询**(2026-07-14):`_produce` 空转 sleep 从固定 4ms 改为
+  播放中 4ms / 暂停 50ms——服务托管下播放器 7×24 常驻,原来空闲也烧 ~5% 单核。
 
 ---
 
@@ -132,7 +143,7 @@
 "C:/Users/11651/AppData/Local/Programs/Python/Python313/python.exe" player.py --device 27
 ```
 
-命令行开关:`--device N`(声卡输出设备索引)、`--hidden`(服务模式:先 `show()` 走完首次绘制再 `hide()`,并起线程读 **stdin 指令** `show/hide/toggle` 用 Qt 自己显隐)、`--paused`(不自动播放)、`--no-smtc`(关闭 SMTC 发布,避免与 pc-service 的 `smtc_helper` 打架)。服务模式下:**禁用手动关闭**(任务栏 X/关闭窗口不关也不隐藏,窗口作为绿幕捕获源常驻;但 **stdin EOF=托管它的 pc-service 退出/崩溃时会自退**,避免成为关不掉的孤儿隐藏进程);隐藏歌词(ESC 或托盘/stdin `hide`)时 **先把内容清成全绿(`blank` 态,同步画一帧再延迟隐藏)**,让直播伴侣捕获冻结帧=纯绿、不残留歌词;显示(`show`)恢复正常渲染。`showEvent/hideEvent` 经 **stdout 上报 `VIS:0/1`** 给 pc-service 同步状态。播放器由 pc-service 托管时用 `--device 27 --hidden --paused --no-smtc` 拉起,显隐走管道 IPC(不能用外部 win32 `ShowWindow`——Qt 透明窗不会重绘),见 [../live-remote/README.md](../live-remote/README.md)。
+命令行开关:`--device N`(声卡输出设备索引)、`--hidden`(服务模式:**不预建窗口**,起线程读 **stdin 指令** `show/hide/toggle` 用 Qt 自己显隐;HWND 只在 `show` 时创建、隐藏后销毁,见"关键技术决策"的 ToDesk 拖影条目)、`--paused`(不自动播放)、`--no-smtc`(关闭 SMTC 发布,避免与 pc-service 的 `smtc_helper` 打架)。服务模式下:**禁用手动关闭**(任务栏 X/关闭窗口不关也不隐藏;但 **stdin EOF=托管它的 pc-service 退出/崩溃时会自退**,避免成为关不掉的孤儿隐藏进程);隐藏歌词(ESC 或托盘/stdin `hide`)时 **先把内容清成全绿(`blank` 态,同步画一帧,80ms 后隐藏并销毁 HWND)**,让直播伴侣捕获冻结帧=纯绿、不残留歌词;显示(`show`)重建窗口恢复正常渲染。`showEvent/hideEvent` 经 **stdout 上报 `VIS:0/1`** 给 pc-service 同步状态。播放器由 pc-service 托管时用 `--device 27 --hidden --paused --no-smtc` 拉起,显隐走管道 IPC(不能用外部 win32 `ShowWindow`——Qt 透明窗不会重绘),见 [../live-remote/README.md](../live-remote/README.md)。
 
 ### 服务模式 IPC 协议(pc-service ↔ 播放器)
 歌曲来源:优先 `D:\KaraokeLibrary\<mid>\`(永久曲库),回退 WeSing `Res\`(`song_dir_for`)。

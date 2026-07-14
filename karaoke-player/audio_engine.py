@@ -82,7 +82,9 @@ class AudioEngine:
                 tsm.set_speed(speed)
                 cur_speed = speed
             if (not playing) or pos >= len(src) or self._q.full():
-                time.sleep(0.004)
+                # 播放中队列满 → 4ms 快轮询保供给;暂停/播完 → 50ms 慢轮询省 CPU
+                # (服务托管下播放器 7×24 常驻,空闲自旋别白烧核)
+                time.sleep(0.004 if playing else 0.05)
                 continue
 
             end = min(pos + FEED, len(src))

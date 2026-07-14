@@ -37,6 +37,9 @@
 - **声卡**:ROUTIST R2(虚拟路由多通道)+ Studio One。
   - 伴奏/BGM 走 `PLAYBACK 1/2`(WeSing/karaoke-player 用,WASAPI 设备索引约 27)。
   - **别往 `PLAYBACK 3/4` 灌音频**(麦克风监听通道,会回授炸麦)。
+  - 推流采集链路:音乐→`PLAYBACK 1/2`→Studio One「他人听」总线→ASIO `PLAYBACK 3/4`→
+    `VIRTUAL REC 3/4`→直播伴侣主麦克风。**直播间没声先查 Windows 里 `VIRTUAL REC 3/4`
+    录音端点音量**(2026-07 曾被莫名归零,全链路静音;各软件电平都正常时尤其要查这里)。
 - **全民K歌**:PC 版 `WeSing.exe`(`D:\WeSing\WeSing.exe`),缓存在 `D:\WeSingCache\WeSingDL\`;
   手机版包名 `com.tencent.karaoke`。
 - **QQ音乐**:PC 版做直播 BGM,按进程名用 pycaw 控音量。
@@ -50,10 +53,12 @@
 ## 五、当前进展与下一步
 
 - **live-remote**:PC 服务(声卡场景 + QQ音乐 + 显隐窗口)已完成。**K歌整合已全面接入并持续打磨**:自动曲库
-  导入器 + 托管 K歌播放器子进程 + 点歌队列/播放控制 WS API + **托盘曲库管理页(勾选加歌单/编辑歌名/播放切歌/搜索)**;
+  导入器 + 托管 K歌播放器子进程 + 点歌队列/播放控制 WS API + **托盘曲库管理页(勾选加歌单/编辑歌名/播放切歌/
+  搜索防抖/Live筛选/勾选排序/触底分页渲染)**;
   跨重启缓存(场景/音量/Studio显隐/音准线显隐/字体/歌单)存 `state_cache.json`。
 - **LiveRemote**:安卓原生 App(Compose,演唱/队列/遥控三页签),遥控页含声卡场景 + QQ音乐 + 窗口开关
-  (Studio One / K歌歌词 / 音准线显隐)。**注意:改了手机端功能需重新 `assembleDebug` + adb 装机才生效**。
+  (Studio One / K歌歌词 / 音准线显隐);点歌抽屉支持搜索 + 触底分页。
+  **注意:改了手机端功能需重新 `assembleDebug` + adb 装机才生效**。
 - **karaoke-player**:已从单曲 Demo 演进为多曲直播字幕源。**KTV 双行错开歌词 + 压扁音准线(均由白染蓝)**、
   竖屏 3:4 窗、绿幕抠图、实时升降调、原唱/伴奏、`Q` 字体循环、`P` 音准线显隐、**`O`+`Ctrl+↑↓` 顶端滚动歌单**、
   手机音量键同步(感知曲线)。热键/IPC/缓存详见 [karaoke-player/README.md](karaoke-player/README.md)。

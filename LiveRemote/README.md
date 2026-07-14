@@ -67,6 +67,11 @@ WebSocket 客户端连 pc-service(`ws://<电脑IP>:8765/ws`),曲库走 `GET /lib
 >   面板用 **lambda 版 `offset{}`**、蒙层淡出用 `graphicsLayer{}`(高频值只在布局/绘制阶段读,拖动零重组,
 >   符合性能红线);`draggable` 自带松手速度,下拉超 1/4 高度或快甩(>1500px/s)即收起,否则弹回。
 >   手势不挂列表区,避免与 `LazyColumn` 滚动嵌套冲突。
+> - **点歌抽屉触底分页(2026-07-14)**:`PickerSheet` 的 `LazyColumn` 只喂过滤结果的前 `visible` 条
+>   (每批 `PICKER_PAGE=60`),`derivedStateOf` 监听"最后可见项进入倒数 6 条"→ 追加一批;追加后若仍在
+>   底部附近,`shown.size` 变化会让 effect 重跑继续追加,直到离开底部或全部显示(不会卡在"差几条不加载")。
+>   搜索词一变(`remember(query)`)自动重置回首批;末尾有"上滑加载更多 · x/y"提示行。大曲库首开面板/
+>   清空搜索不再整表 diff+测量掉帧。
 > - **悬浮球位置持久化(2026-07-13)**:`BgmFab` 把球位置按**归一化比例**存 SharedPreferences
 >   (`cfg` 的 `fab_rx/fab_ry`),拖动结束写盘;启动时在 remember 初始化块**同步读回**(prefs 早被
 >   ViewModel 加载,内存命中)→ 首帧渲染前位置已就绪,启动即上次位置、不跳动。展开面板跟随球位置弹出。

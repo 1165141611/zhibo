@@ -16,11 +16,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,6 +37,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.liveremote.model.Song
@@ -58,6 +62,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
+private const val PICKER_PAGE = 60   // 触底分页:每批追加渲染的曲目数
+
 @Composable
 fun PickerSheet(
     library: List<Song>,
@@ -70,6 +76,23 @@ fun PickerSheet(
     val filtered = remember(query, library) {
         val q = query.trim()
         if (q.isEmpty()) library else library.filter { it.title.contains(q, true) || it.artist.contains(q, true) }
+    }
+
+    // ── 触底分页:LazyColumn 只喂前 visible 条,滚近底部再追加一批 ──────────────
+    // 大曲库一次性全喂,首开面板/搜索清空时的整表 diff+测量会掉帧;分页后列表任何时刻都很轻。
+    // 搜索词一变(remember(query))自动重置回首批。追加后若仍在底部附近(shown.size 变了)
+    // effect 会再跑一轮继续追加,直到离开底部或全部显示,不会卡在"差几条不加载"。
+    val listState = rememberLazyListState()
+    var visible by remember(query) { mutableIntStateOf(PICKER_PAGE) }
+    val shown = if (filtered.size <= visible) filtered else filtered.subList(0, visible)
+    val nearBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 6
+        }
+    }
+    LaunchedEffect(nearBottom, shown.size, filtered.size) {
+        if (nearBottom && visible < filtered.size) visible += PICKER_PAGE
     }
 
     // 下拉收起:dragY 用 Animatable 存位移,面板用 **lambda 版 offset{}** 读它——位移只在布局放置
@@ -150,12 +173,21 @@ fun PickerSheet(
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, top = 14.dp, bottom = 10.dp)) {
                 Text("曲库 · ${filtered.size}", color = C.TextDim, fontSize = F.pill, fontWeight = FontWeight.Bold)
             }
-            LazyColumn(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 16.dp)) {
-                items(filtered, key = { it.mid }) { s ->
+            LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 16.dp)) {
+                items(shown, key = { it.mid }) { s ->
                     SongRow(s, isAdded = added.contains(s.mid)) {
                         onAdd(s)
                         added = added + s.mid
                         scope.launch { delay(1200); added = added - s.mid }
+                    }
+                }
+                if (shown.size < filtered.size) {
+                    item("__load_more") {   // 还有未渲染的 → 触底提示行(滚到它附近就自动追加)
+                        Text(
+                            "上滑加载更多 · ${shown.size}/${filtered.size}",
+                            color = C.TextDim, fontSize = F.sub, textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                        )
                     }
                 }
                 item { Box(Modifier.height(22.dp)) }

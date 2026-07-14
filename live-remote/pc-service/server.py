@@ -32,6 +32,27 @@ import psutil
 from pycaw.pycaw import (AudioUtilities, ISimpleAudioVolume,
                          IAudioSessionManager2, IAudioSessionControl2)
 
+# ── 关键防崩:全局禁用 comtypes 的 GC 自动 Release ──────────────────────────
+# 本进程 comtypes 只用于 pycaw(WASAPI 会话音量)。实测(server.log + Windows 事件日志):
+# QQ音乐 暂停/切歌/会话变化后,pycaw 拿到的 COM 指针会悬空,GC 触发 comtypes
+# `_compointer_base.__del__ → Release()` 就是对已释放内存读写:
+#   - 有时被 ctypes SEH 兜住 → server.log 里 "Exception ignored ... access violation
+#     writing ..."(但"写"类 AV 落在可写页上会**静默改坏堆**,之后在随机位置崩——
+#     实录 ucrtbase c0000409 failfast);
+#   - 有时兜不住 → 进程直接闪退(实录 _ctypes.pyd+0x8535 c0000005,7/13-7/14 四次同签名;
+#     开曲库管理窗(大量建 tk 控件触发分代 GC,__del__ 就在 tk 线程执行)或点歌开唱
+#     (BGM 联动渐变频繁解析/作废会话)时最易命中)。
+# 旧"指针坟场"(_qq_graveyard)只保住了缓存的 ISimpleAudioVolume;每次解析会话还会产生
+# 几十个临时包装(设备/SessionManager/枚举器/SessionControl),这里一并兜底:把 __del__
+# 换成 no-op,**所有 COM 包装都不再由 GC Release**(故意泄漏,单个几十字节,常驻服务
+# 无所谓——稳定性优先,与坟场同一哲学)。
+try:
+    from comtypes._post_coinit.unknwn import _compointer_base as _ct_ptr_base
+    _ct_ptr_base.__del__ = lambda self: None
+    print("[COM] 已禁用 comtypes GC Release(防悬空 COM 指针闪退)")
+except Exception as _e:      # comtypes 版本升级找不到该私有类时不拦启动,仅提示
+    print(f"[COM] 禁用 comtypes GC Release 失败(继续运行,注意崩溃风险): {_e}")
+
 import winmm_midi
 import studio_win
 import karaoke_win
@@ -1039,9 +1060,16 @@ def _open_rename_dialog(mid):
     threading.Thread(target=_dlg, daemon=True).start()
 
 
-def _open_library_browser():
-    """点托盘"曲库: N 首" → 曲库管理窗:按入库时间**倒序**列出全部歌,搜索框实时过滤;每行末尾带
-    "编辑"/"播放"按钮(播放=立即切歌),右侧滚动条。独立线程单 Tk 根;编辑用子 Toplevel(同根同线程,稳)。"""
+def _open_library_browser(selftest=False):
+    """点托盘"曲库: N 首" → 曲库管理窗(高性能版):
+    - 搜索框 **200ms 防抖**(老版每敲一键全量重建所有行,正是卡顿主因之一);
+    - **Live 筛选**:全部 / 只看Live / 排除Live(约定:歌名含 "live" 即视为 Live 版);
+    - **排序**:最新入库(默认) / 未勾选在前 / 已勾选在前(勾选=在歌单里;组内仍按入库时间倒序);
+    - **触底分页渲染**:每批 60 行,滚动到底自动续批。不再一次性把几百行 tk 控件全建出来;
+      内容不足一屏时 yscrollcommand 同样会触发(last=1.0),自动续批直到填满或渲完;
+    - 每行:勾选=加歌单、编辑/播放按钮、斑马纹+悬停+选中态,交互与旧版一致。
+    独立线程单 Tk 根;编辑用子 Toplevel(同根同线程,稳)。
+    selftest=True 供 headless 自检:自动滚底驱动分页并打印进度,渲完自毁,不影响正常使用。"""
 
     def _win():
         try:
@@ -1049,16 +1077,30 @@ def _open_library_browser():
             from tkinter import ttk
             root = tk.Tk()
             root.title("K歌曲库管理")
-            root.geometry("620x460")
+            root.geometry("640x500")
             root.attributes("-topmost", True)
 
             top = tk.Frame(root)
-            top.pack(fill="x", padx=10, pady=(10, 4))
+            top.pack(fill="x", padx=10, pady=(10, 2))
             tk.Label(top, text="搜索:").pack(side="left")
             q = tk.StringVar()
             tk.Entry(top, textvariable=q).pack(side="left", fill="x", expand=True, padx=6)
             count_var = tk.StringVar()
             tk.Label(top, textvariable=count_var).pack(side="left")
+
+            # 筛选 + 排序(选择即刷新)
+            bar2 = tk.Frame(root)
+            bar2.pack(fill="x", padx=10, pady=(2, 0))
+            tk.Label(bar2, text="筛选:").pack(side="left")
+            f_var = tk.StringVar(value="全部")
+            cb_f = ttk.Combobox(bar2, textvariable=f_var, state="readonly", width=9,
+                                values=("全部", "只看Live", "排除Live"))
+            cb_f.pack(side="left", padx=(4, 14))
+            tk.Label(bar2, text="排序:").pack(side="left")
+            s_var = tk.StringVar(value="最新入库")
+            cb_s = ttk.Combobox(bar2, textvariable=s_var, state="readonly", width=11,
+                                values=("最新入库", "未勾选在前", "已勾选在前"))
+            cb_s.pack(side="left", padx=4)
 
             tk.Label(root, text="☑ 勾选 = 加入歌单(播放器顶端滚动显示)", anchor="w",
                      fg="#888888").pack(fill="x", padx=12)
@@ -1068,7 +1110,6 @@ def _open_library_browser():
             body.pack(fill="both", expand=True, padx=(10, 0), pady=4)
             canvas = tk.Canvas(body, highlightthickness=0)
             vsb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
-            canvas.configure(yscrollcommand=vsb.set)
             vsb.pack(side="right", fill="y")
             canvas.pack(side="left", fill="both", expand=True)
             inner = tk.Frame(canvas, bg="#ffffff")
@@ -1082,8 +1123,10 @@ def _open_library_browser():
 
             # 行配色:斑马纹交替底色 + 悬停高亮 + 点击选中态(纯 tk 无 Treeview 选中样式,手动画)
             C_EVEN, C_ODD, C_HOVER, C_SEL = "#ffffff", "#f4f5f7", "#eaf1fb", "#c8e0f8"
-            rows = []                # [{frame, cells, base, mid, paint}]
-            sel = {"mid": None}      # 当前选中的 mid(跨搜索保留)
+            PAGE = 60                     # 触底分页:每批渲染行数
+            view = {"items": [], "pos": 0, "queued": False}  # items=[(mid,meta)];pos=已渲染数
+            rows = []                # 已渲染行 [{paint, mid}](重画选中/悬停态用)
+            sel = {"mid": None}      # 当前选中的 mid(跨搜索/续批保留)
 
             def _edit(mid):
                 dlg = tk.Toplevel(root)
@@ -1104,72 +1147,126 @@ def _open_library_browser():
                 for r in rows:
                     r["paint"]()
 
+            def _add_row(mid, m, idx):
+                """渲染一行(idx 定斑马纹底色)。行结构/交互与旧版完全一致。"""
+                title = (m.get("title") or "").strip()
+                artist = (m.get("artist") or "").strip()
+                ts = m.get("added", 0)
+                tstr = time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else ""
+                base = C_EVEN if idx % 2 == 0 else C_ODD
+                rf = tk.Frame(inner, bg=base)
+                rf.pack(fill="x")
+                rf.columnconfigure(1, weight=1, minsize=160)   # 歌名列伸缩(col1)
+                # col0:勾选框 = 加入歌单(默认按 STATE["setlist"];顶端滚动字幕)
+                var = tk.BooleanVar(value=(mid in STATE.get("setlist", [])))
+                chk = tk.Checkbutton(
+                    rf, variable=var, bg=base, activebackground=base,
+                    command=lambda mid=mid, var=var: set_setlist_member(mid, var.get()))
+                chk.grid(row=0, column=0, padx=(6, 0))
+                name_fg = "#c0392b" if m.get("needs_name") else "#111111"
+                l_name = tk.Label(rf, text=title or "(待命名)", anchor="w",
+                                  bg=base, fg=name_fg, padx=8, pady=7)
+                l_name.grid(row=0, column=1, sticky="w")
+                l_art = tk.Label(rf, text=artist, anchor="w", width=11,
+                                 bg=base, fg="#333333")
+                l_art.grid(row=0, column=2, sticky="w", padx=4)
+                l_time = tk.Label(rf, text=tstr, anchor="w", width=11,
+                                  bg=base, fg="#999999")
+                l_time.grid(row=0, column=3, sticky="w", padx=4)
+                tk.Button(rf, text="编辑", width=5,
+                          command=lambda mid=mid: _edit(mid)).grid(
+                    row=0, column=4, padx=(6, 2), pady=3)
+                tk.Button(rf, text="播放", width=5,
+                          command=lambda mid=mid: _play(mid)).grid(
+                    row=0, column=5, padx=(2, 8), pady=3)
+                cells = (l_name, l_art, l_time)
+
+                def _mk_paint(rf=rf, cells=cells, chk=chk, base=base, mid=mid):
+                    def paint(hover=False):
+                        c = (C_SEL if sel["mid"] == mid
+                             else (C_HOVER if hover else base))
+                        rf.configure(bg=c)
+                        for lb in cells:
+                            lb.configure(bg=c)
+                        chk.configure(bg=c, activebackground=c)
+                    return paint
+
+                paint = _mk_paint()
+                for w in (rf, l_name, l_art, l_time):   # 整行(含各格)都响应悬停/点击
+                    w.bind("<Enter>", lambda e, p=paint: p(True))
+                    w.bind("<Leave>", lambda e, p=paint: p(False))
+                    w.bind("<Button-1>", lambda e, mid=mid: _select(mid))
+                chk.bind("<Enter>", lambda e, p=paint: p(True))   # 勾选框上也保持悬停色
+                chk.bind("<Leave>", lambda e, p=paint: p(False))
+                rows.append({"paint": paint, "mid": mid})
+
+            def _render_more():
+                """追加渲染下一批 PAGE 行,更新"已显示/总数"计数。"""
+                view["queued"] = False
+                items, start = view["items"], view["pos"]
+                end = min(start + PAGE, len(items))
+                for i in range(start, end):
+                    _add_row(items[i][0], items[i][1], i)
+                view["pos"] = end
+                count_var.set(f"已显示 {end} / 共 {len(items)} 首")
+
+            def _on_scroll(first, last):
+                """yscrollcommand:既喂滚动条,也做触底检测(视野越过 94% 即续批)。
+                内容不满一屏时 last=1.0 同样触发 → 自动续批填满首屏。
+                after_idle 出回调再渲染,queued 防重复排队。"""
+                vsb.set(first, last)
+                if (float(last) > 0.94 and not view["queued"]
+                        and view["pos"] < len(view["items"])):
+                    view["queued"] = True
+                    root.after_idle(_render_more)
+
+            canvas.configure(yscrollcommand=_on_scroll)
+
             def refresh():
+                """重算 筛选+排序 结果集,清掉已渲染行,渲首批(其余滚动触底续批)。"""
                 for w in inner.winfo_children():
                     w.destroy()
                 rows.clear()
                 kw = q.get().strip().lower()
-                items = sorted(library.manifest().items(),
-                               key=lambda kv: kv[1].get("added", 0), reverse=True)
-                shown = 0
-                for mid, m in items:
-                    title = (m.get("title") or "").strip()
-                    artist = (m.get("artist") or "").strip()
-                    if kw and kw not in title.lower() and kw not in artist.lower():
+                flt, srt = f_var.get(), s_var.get()
+                setlist = set(STATE.get("setlist", []))
+                items = []
+                for mid, m in library.manifest().items():
+                    title = (m.get("title") or "").strip().lower()
+                    artist = (m.get("artist") or "").strip().lower()
+                    if kw and kw not in title and kw not in artist:
                         continue
-                    ts = m.get("added", 0)
-                    tstr = time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else ""
-                    base = C_EVEN if shown % 2 == 0 else C_ODD
-                    rf = tk.Frame(inner, bg=base)
-                    rf.pack(fill="x")
-                    rf.columnconfigure(1, weight=1, minsize=160)   # 歌名列伸缩(col1)
-                    # col0:勾选框 = 加入歌单(默认按 STATE["setlist"];顶端滚动字幕)
-                    var = tk.BooleanVar(value=(mid in STATE.get("setlist", [])))
-                    chk = tk.Checkbutton(
-                        rf, variable=var, bg=base, activebackground=base,
-                        command=lambda mid=mid, var=var: set_setlist_member(mid, var.get()))
-                    chk.grid(row=0, column=0, padx=(6, 0))
-                    name_fg = "#c0392b" if m.get("needs_name") else "#111111"
-                    l_name = tk.Label(rf, text=title or "(待命名)", anchor="w",
-                                      bg=base, fg=name_fg, padx=8, pady=7)
-                    l_name.grid(row=0, column=1, sticky="w")
-                    l_art = tk.Label(rf, text=artist, anchor="w", width=11,
-                                     bg=base, fg="#333333")
-                    l_art.grid(row=0, column=2, sticky="w", padx=4)
-                    l_time = tk.Label(rf, text=tstr, anchor="w", width=11,
-                                      bg=base, fg="#999999")
-                    l_time.grid(row=0, column=3, sticky="w", padx=4)
-                    tk.Button(rf, text="编辑", width=5,
-                              command=lambda mid=mid: _edit(mid)).grid(
-                        row=0, column=4, padx=(6, 2), pady=3)
-                    tk.Button(rf, text="播放", width=5,
-                              command=lambda mid=mid: _play(mid)).grid(
-                        row=0, column=5, padx=(2, 8), pady=3)
-                    cells = (l_name, l_art, l_time)
-
-                    def _mk_paint(rf=rf, cells=cells, chk=chk, base=base, mid=mid):
-                        def paint(hover=False):
-                            c = (C_SEL if sel["mid"] == mid
-                                 else (C_HOVER if hover else base))
-                            rf.configure(bg=c)
-                            for lb in cells:
-                                lb.configure(bg=c)
-                            chk.configure(bg=c, activebackground=c)
-                        return paint
-
-                    paint = _mk_paint()
-                    for w in (rf, l_name, l_art, l_time):   # 整行(含各格)都响应悬停/点击
-                        w.bind("<Enter>", lambda e, p=paint: p(True))
-                        w.bind("<Leave>", lambda e, p=paint: p(False))
-                        w.bind("<Button-1>", lambda e, mid=mid: _select(mid))
-                    chk.bind("<Enter>", lambda e, p=paint: p(True))   # 勾选框上也保持悬停色
-                    chk.bind("<Leave>", lambda e, p=paint: p(False))
-                    rows.append({"paint": paint, "mid": mid})
-                    shown += 1
-                count_var.set(f"共 {shown} 首")
+                    if flt != "全部":
+                        is_live = "live" in title       # 歌名含 live 即视为 Live 版
+                        if (flt == "只看Live") != is_live:
+                            continue
+                    items.append((mid, m))
+                if srt == "未勾选在前":        # 按勾选态分组,组内仍按入库时间倒序
+                    items.sort(key=lambda kv: (kv[0] in setlist,
+                                               -(kv[1].get("added") or 0)))
+                elif srt == "已勾选在前":
+                    items.sort(key=lambda kv: (kv[0] not in setlist,
+                                               -(kv[1].get("added") or 0)))
+                else:                          # 最新入库(默认,同旧版)
+                    items.sort(key=lambda kv: kv[1].get("added") or 0, reverse=True)
+                view["items"], view["pos"] = items, 0
                 canvas.yview_moveto(0)
+                _render_more()    # 首批;不满一屏时 _on_scroll 会自动续批
 
-            q.trace_add("write", lambda *a: refresh())
+            # 搜索防抖:停敲 200ms 才刷新
+            _deb = {"id": None}
+
+            def _on_query(*_a):
+                if _deb["id"] is not None:
+                    try:
+                        root.after_cancel(_deb["id"])
+                    except Exception:
+                        pass
+                _deb["id"] = root.after(200, refresh)
+
+            q.trace_add("write", _on_query)
+            cb_f.bind("<<ComboboxSelected>>", lambda e: refresh())
+            cb_s.bind("<<ComboboxSelected>>", lambda e: refresh())
 
             bar = tk.Frame(root)
             bar.pack(fill="x", padx=10, pady=(0, 10))
@@ -1177,6 +1274,19 @@ def _open_library_browser():
 
             refresh()
             root.after(120, root.focus_force)
+            if selftest:   # headless 自检:反复滚到底驱动分页,打印进度,渲完自毁
+                def _auto(i=0):
+                    try:
+                        canvas.yview_moveto(1.0)
+                        print(f"[LIBWIN-TEST] shown={view['pos']}/{len(view['items'])}",
+                              flush=True)
+                        if view["pos"] >= len(view["items"]) or i >= 80:
+                            root.after(300, root.destroy)
+                        else:
+                            root.after(150, lambda: _auto(i + 1))
+                    except Exception:
+                        pass
+                root.after(600, _auto)
             root.mainloop()
         except Exception as ex:
             print(f"[LIB] 曲库管理窗失败: {ex}")

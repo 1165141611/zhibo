@@ -42,6 +42,10 @@
 
 ### 每次直播启动顺序(重要)
 1. loopMIDI(建议设开机自启,否则虚拟端口不存在)
+   - **踩坑(2026-07)**:重启/快速启动(休眠恢复)后可能出现 loopMIDI 在跑但端口列表为空、
+     Studio One Mackie 报"没找到端口"。配置(注册表 `HKCU\Software\Tobias Erichsen\loopMIDI\Ports`)
+     和 teVirtualMIDI 驱动其实都正常,**把 loopMIDI 进程退出重开一次即可自动重建两个端口**,
+     然后重启 pc-service(它启动时才打开 MIDI 口),Studio One 一般会自动找回端口。
 2. Studio One(打开工程)
 3. 双击 `run_server.bat`
 4. 手机开控制台
@@ -461,3 +465,34 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
   `RemoteViewModel.toggleSetlist()`、`RemoteScreen` "窗口开关"区顺序 Studio One → **滚动歌单** → K歌歌词 → 音准线。
   **验证**:WS 端到端 `setlist_toggle` 翻转+落盘+切回全过;`assembleDebug` BUILD SUCCESSFUL。**手机当前离线
   (adb 192.168.1.6:5555 offline),APK 已出待装。**
+- **曲库管理窗高性能化 + 手机点歌抽屉触底分页**(2026-07-14,作者要求):
+  - **PC(`_open_library_browser`)**:①**触底分页渲染**——筛选/排序先在数据层算好整个结果集,tk 控件每批只建
+    60 行;`yscrollcommand` 包一层(喂 `vsb.set` 同时做触底检测,`last>0.94` 即 `after_idle` 续批,`queued` 防
+    重入);内容不满一屏时 `last=1.0` 同样触发 → 自动填满首屏。不再一次性全量建几百行(打开/每键搜索都全表重建
+    是老版卡顿根源)。②**搜索防抖 200ms**(`after_cancel`+`after`)。③**Live 筛选**下拉:全部/只看Live/排除Live
+    (歌名含 `live` 不分大小写即视为 Live)。④**排序**下拉:最新入库(默认)/未勾选在前/已勾选在前(勾选=在
+    `STATE["setlist"]`;组内按入库时间倒序;勾选/取消不即时重排防行跳动)。计数改"已显示 x / 共 y 首"。
+    加 `selftest=True` headless 自检参数:自动滚底驱动分页、打印进度、渲完自毁。
+    **验证**:500 首假歌(1/5 带 Live)自检——首屏自动填到 120,触底每次 +60 直到 500/500,无报错。
+  - **App(`PickerSheet`)**:`LazyColumn` 只喂过滤结果前 `visible` 条(每批 `PICKER_PAGE=60`),`derivedStateOf`
+    监听最后可见项进倒数 6 条 → 追加;`shown.size` 变化让 effect 重跑,仍在底部就继续追加(不卡在"差几条
+    不加载")。搜索词变化 `remember(query)` 重置回首批;末尾"上滑加载更多 · x/y"提示行。手机端按需求只做
+    搜索 + 触底分页(Live 筛选/勾选排序仅 PC 曲库管理窗)。**验证**:`assembleDebug` BUILD SUCCESSFUL + adb 装机。
+- **服务端反复闪退(开曲库管理窗 / 点歌开唱)根因定位 + 修复**(2026-07-14,作者报"容易闪退"):
+  - **取证**:Windows 事件日志 4 次同签名崩溃 `python.exe / _ctypes.pyd+0x8535 / c0000005`(7/13 22:02、
+    7/14 00:04、7/14 20:19:55、20:20:23)+ 1 次 `ucrtbase c0000409`(failfast,堆已被改坏的典型);按崩溃
+    进程启动时间(FILETIME)与存活进程对时,崩的都是 **server.py 主进程**(20:20:06 启动的那次只活了 17 秒);
+    播放器/手机 App 完全不用 ctypes/comtypes,排除。`server.log` 同期实录两条
+    `comtypes __del__ → Release() → access violation writing`(其一写往 DLL 映射区地址)。
+  - **根因**:7/13 的"指针坟场"只保住了**缓存的** `ISimpleAudioVolume`;每次 `_resolve_qq_sessions` 仍会
+    临时创建几十个 COM 包装(GetAllDevices 的 35 个设备、SessionManager、枚举器、每会话 ctl/ctl2),QQ音乐
+    暂停/切歌后这些指针悬空,**GC 在任意线程触发都会去 `__del__→Release()`**:被 ctypes SEH 兜住就是
+    server.log 里的 "Exception ignored"(**"写"类 AV 落在可写页上会静默改坏堆**,后来在随机位置
+    c0000409);兜不住就直接 c0000005 闪退。所以**开曲库管理窗**(一次建几十上百个 tk 控件,触发分代 GC,
+    毒 `__del__` 恰好在 tk 线程执行)和**点歌开唱**(BGM 联动渐变频繁解析/作废会话)最易命中。
+  - **修复**:server.py 导入 pycaw 后全局把 `comtypes._post_coinit.unknwn._compointer_base.__del__`
+    替换为 no-op——**所有 COM 包装都不再由 GC Release**(坟场哲学推广到全部;故意泄漏,单个几十字节,
+    常驻服务可接受)。comtypes 升级找不到该私有类时仅打日志不拦启动。
+  - **验证**:独立进程 import server(补丁生效)后,真实环境(QQ音乐 5 会话)连续 5 轮
+    `_resolve_qq_sessions` + `get_qq_volume` + `gc.collect()`,零 AV、零 "Exception ignored"、进程存活。
+    **需重启托盘服务才生效。**
