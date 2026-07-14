@@ -961,8 +961,8 @@ def _open_rename_dialog(mid):
 
 
 def _open_library_browser():
-    """点托盘"曲库: N 首" → 曲库管理窗:按入库时间**倒序**列出全部歌,搜索框实时过滤,双击(或
-    选中点"编辑")改歌名/歌手。独立线程单 Tk 根 + 子 Toplevel 编辑(同根同线程,稳)。"""
+    """点托盘"曲库: N 首" → 曲库管理窗:按入库时间**倒序**列出全部歌,搜索框实时过滤;每行末尾带
+    "编辑"/"播放"按钮(播放=立即切歌),右侧滚动条。独立线程单 Tk 根;编辑用子 Toplevel(同根同线程,稳)。"""
 
     def _win():
         try:
@@ -970,7 +970,7 @@ def _open_library_browser():
             from tkinter import ttk
             root = tk.Tk()
             root.title("K歌曲库管理")
-            root.geometry("600x440")
+            root.geometry("620x460")
             root.attributes("-topmost", True)
 
             top = tk.Frame(root)
@@ -981,18 +981,51 @@ def _open_library_browser():
             count_var = tk.StringVar()
             tk.Label(top, textvariable=count_var).pack(side="left")
 
-            cols = ("artist", "added")
-            tree = ttk.Treeview(root, columns=cols, show="tree headings", height=15)
-            tree.heading("#0", text="歌名")
-            tree.heading("artist", text="歌手")
-            tree.heading("added", text="入库时间")
-            tree.column("#0", width=300)
-            tree.column("artist", width=140)
-            tree.column("added", width=120, anchor="center")
-            tree.pack(fill="both", expand=True, padx=10, pady=4)
+            # 列表区:Canvas + 内嵌 Frame + 右侧滚动条(为了每行放真按钮,不用 Treeview)
+            body = tk.Frame(root)
+            body.pack(fill="both", expand=True, padx=(10, 0), pady=4)
+            canvas = tk.Canvas(body, highlightthickness=0)
+            vsb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=vsb.set)
+            vsb.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
+            inner = tk.Frame(canvas, bg="#ffffff")
+            win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+            inner.bind("<Configure>",
+                       lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+            canvas.bind("<Configure>",
+                        lambda e: canvas.itemconfig(win_id, width=e.width))
+            canvas.bind_all("<MouseWheel>",         # 滚轮(本解释器独享,窗口关即失效)
+                            lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+            # 行配色:斑马纹交替底色 + 悬停高亮 + 点击选中态(纯 tk 无 Treeview 选中样式,手动画)
+            C_EVEN, C_ODD, C_HOVER, C_SEL = "#ffffff", "#f4f5f7", "#eaf1fb", "#c8e0f8"
+            rows = []                # [{frame, cells, base, mid, paint}]
+            sel = {"mid": None}      # 当前选中的 mid(跨搜索保留)
+
+            def _edit(mid):
+                dlg = tk.Toplevel(root)
+                dlg.title("修改歌名")
+                dlg.attributes("-topmost", True)
+                dlg.resizable(False, False)
+                dlg.grab_set()                      # 模态(同根,安全)
+                _build_edit_form(dlg, mid, on_saved=refresh)
+
+            def _play(mid):
+                sel["mid"] = mid                    # 播放即选中,反馈更明确
+                for r in rows:
+                    r["paint"]()
+                k_play_mid(mid)                     # 立即 load+play,有歌在播则切歌
+
+            def _select(mid):
+                sel["mid"] = mid
+                for r in rows:
+                    r["paint"]()
 
             def refresh():
-                tree.delete(*tree.get_children())
+                for w in inner.winfo_children():
+                    w.destroy()
+                rows.clear()
                 kw = q.get().strip().lower()
                 items = sorted(library.manifest().items(),
                                key=lambda kv: kv[1].get("added", 0), reverse=True)
@@ -1004,31 +1037,51 @@ def _open_library_browser():
                         continue
                     ts = m.get("added", 0)
                     tstr = time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else ""
-                    tag = "junk" if m.get("needs_name") else ""
-                    tree.insert("", "end", iid=mid, text=title or "(待命名)",
-                                values=(artist, tstr), tags=(tag,))
-                    shown += 1
-                tree.tag_configure("junk", foreground="#c0392b")
-                count_var.set(f"共 {shown} 首")
+                    base = C_EVEN if shown % 2 == 0 else C_ODD
+                    rf = tk.Frame(inner, bg=base)
+                    rf.pack(fill="x")
+                    rf.columnconfigure(0, weight=1, minsize=170)   # 歌名列伸缩
+                    name_fg = "#c0392b" if m.get("needs_name") else "#111111"
+                    l_name = tk.Label(rf, text=title or "(待命名)", anchor="w",
+                                      bg=base, fg=name_fg, padx=10, pady=7)
+                    l_name.grid(row=0, column=0, sticky="w")
+                    l_art = tk.Label(rf, text=artist, anchor="w", width=12,
+                                     bg=base, fg="#333333")
+                    l_art.grid(row=0, column=1, sticky="w", padx=4)
+                    l_time = tk.Label(rf, text=tstr, anchor="w", width=12,
+                                      bg=base, fg="#999999")
+                    l_time.grid(row=0, column=2, sticky="w", padx=4)
+                    tk.Button(rf, text="编辑", width=5,
+                              command=lambda mid=mid: _edit(mid)).grid(
+                        row=0, column=3, padx=(6, 2), pady=3)
+                    tk.Button(rf, text="播放", width=5,
+                              command=lambda mid=mid: _play(mid)).grid(
+                        row=0, column=4, padx=(2, 8), pady=3)
+                    cells = (l_name, l_art, l_time)
 
-            def on_edit(*_):
-                sel = tree.selection()
-                if not sel:
-                    return
-                mid = sel[0]
-                dlg = tk.Toplevel(root)
-                dlg.title("修改歌名")
-                dlg.attributes("-topmost", True)
-                dlg.resizable(False, False)
-                dlg.grab_set()                       # 模态(同根,安全)
-                _build_edit_form(dlg, mid, on_saved=refresh)
+                    def _mk_paint(rf=rf, cells=cells, base=base, mid=mid):
+                        def paint(hover=False):
+                            c = (C_SEL if sel["mid"] == mid
+                                 else (C_HOVER if hover else base))
+                            rf.configure(bg=c)
+                            for lb in cells:
+                                lb.configure(bg=c)
+                        return paint
+
+                    paint = _mk_paint()
+                    for w in (rf, l_name, l_art, l_time):   # 整行(含各格)都响应悬停/点击
+                        w.bind("<Enter>", lambda e, p=paint: p(True))
+                        w.bind("<Leave>", lambda e, p=paint: p(False))
+                        w.bind("<Button-1>", lambda e, mid=mid: _select(mid))
+                    rows.append({"paint": paint, "mid": mid})
+                    shown += 1
+                count_var.set(f"共 {shown} 首")
+                canvas.yview_moveto(0)
 
             q.trace_add("write", lambda *a: refresh())
-            tree.bind("<Double-1>", on_edit)
 
             bar = tk.Frame(root)
             bar.pack(fill="x", padx=10, pady=(0, 10))
-            tk.Button(bar, text="编辑选中", width=10, command=on_edit).pack(side="left")
             tk.Button(bar, text="关闭", width=8, command=root.destroy).pack(side="right")
 
             refresh()
@@ -1096,6 +1149,18 @@ def k_play_next():
     else:
         _now_mid = None
         _player_send("pause")
+    _sync_queue_state()
+
+
+def k_play_mid(mid):
+    """从曲库直接播放某首:立即 `load+play`——**有歌在播则=切歌**(静默,不发 show)。
+    不入队,`_queue` 保持不变(本首自然唱完后仍按队列续)。供曲库管理窗"播放"按钮用。"""
+    global _now_mid
+    if not mid:
+        return
+    _now_mid = mid
+    _player_send("load " + mid)
+    _player_send("play")
     _sync_queue_state()
 
 

@@ -122,7 +122,8 @@ class KaraokeWindow(QtWidgets.QWidget):
         # 无边框(不置顶、不加 Qt.Tool;Tool 会导致不进任务栏/窗口捕获列表)
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.resize(1100, 420)
+        # 方形窗:字幕不强行铺满窗口,直播端绿幕抠图后手动裁剪即可(多余留白无所谓)
+        self.resize(760, 760)
         self.setWindowTitle("KaraokePlayer")
 
     # ---------------------------------------------------- 绘制
@@ -150,9 +151,12 @@ class KaraokeWindow(QtWidgets.QWidget):
             self._status_cache = None
 
         now = self.engine.current_ms()
-        pitch_h = int(h * 0.52)
-        self._draw_pitch(p, 0, 0, w, pitch_h, now)
-        self._draw_lyrics(p, 0, pitch_h, w, h - pitch_h, now)
+        lh = self._line_h
+        pitch_top = int(h * 0.24)
+        pitch_h = int(lh * 2)               # 音准区≤两行歌词高,扁平
+        self._draw_pitch(p, 0, pitch_top, w, pitch_h, now)
+        cy_top = pitch_top + pitch_h + int(lh * 1.6)   # 上行基准 y(其上留白给圆点)
+        self._draw_lyrics(p, 0, cy_top, w, now)
         self._draw_status(p, w, h, now)
 
     def _tick_paint(self):
@@ -168,14 +172,14 @@ class KaraokeWindow(QtWidgets.QWidget):
     def _draw_pitch(self, p, x, y, w, h, now):
         playhead = x + w * 0.28
         ppms = 0.18                                 # 像素/毫秒
-        pad = 14
+        pad = max(4, int(h * 0.12))
         top, bh = y + pad, h - 2 * pad
-        # 音准线只表示原唱旋律"趋势",不随升降调移动
+        # 音准线只表示原唱旋律"趋势",不随升降调移动;整体压扁在≤两行歌词高内
 
         # playhead 竖线(不透明,带深色以便抠图);尾奏(过了最后音符/歌词)后隐藏
         if now <= self.content_end:
             p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255), 2))
-            p.drawLine(int(playhead), y + 6, int(playhead), y + h - 6)
+            p.drawLine(int(playhead), int(y), int(playhead), int(y + h))
 
         outline = QtGui.QPen(QtGui.QColor(0, 0, 0), 2)   # 黑描边,抠图干净
         for n in self.song.notes:
@@ -185,7 +189,7 @@ class KaraokeWindow(QtWidgets.QWidget):
                 continue
             ny = self._midi_to_y(n.midi, top, bh)
             active = n.start <= now <= n.end
-            bar_h = 9
+            bar_h = 6
             rect = QtCore.QRectF(nx, ny - bar_h / 2, nw, bar_h)
             p.setPen(outline)
             if active:
@@ -204,64 +208,79 @@ class KaraokeWindow(QtWidgets.QWidget):
     GAP_FOR_DOTS = 8000
     LEAD = 3500          # 圆点倒计时提前量(ms)
 
-    def _draw_lyrics(self, p, x, y, w, h, now):
-        lines = self.song.lines
-        big, small = self.font_big, self.font_small
-        next_col = QtGui.QColor(220, 220, 220)
-        line_h = self._line_h
-        # 两行靠近,做直播底部字幕点缀(主体是主播画面)
-        cy_big = y + h * 0.46
-        cy_next = cy_big + line_h * 1.12
+    @staticmethod
+    def _align_x(x, w, total, align, margin):
+        """按对齐方式算内容左边界:left=靠左留 margin,right=靠右留 margin,center=居中。"""
+        if align == "left":
+            return x + margin
+        if align == "right":
+            return x + w - margin - total
+        return x + (w - total) / 2
 
-        # 正在唱(或刚唱完 300ms 内)的行
+    def _slot(self, i, cy_top, cy_bot):
+        """KTV 交替槽位:偶数行→上行/左对齐,奇数行→下行/右对齐(上下交替、左右错开)。"""
+        return (cy_top, "left") if i % 2 == 0 else (cy_bot, "right")
+
+    def _draw_lyrics(self, p, x, cy_top, w, now):
+        lines = self.song.lines
+        if not lines:
+            return
+        font = self.font_big                 # 上下两行同尺寸(不再上大下小)
+        lh = self._line_h
+        margin = w * 0.06
+        cy_bot = cy_top + lh * 1.15          # 下行略低于上行,左右错开
+        dots_dy = lh * 0.9                   # 圆点在所属行顶部上方
+
+        # 当前活跃行(唱中或刚唱完 300ms 内)
         cur = None
         for i, ln in enumerate(lines):
             if ln.start <= now < ln.end + 300:
                 cur = i
             elif ln.start > now:
                 break
+
         if cur is not None:
-            self._draw_word_line(p, lines[cur], x, cy_big, w, big, now)
-            if cur + 1 < len(lines):
-                self._draw_plain_line(p, lines[cur + 1].text, x, cy_next, w,
-                                      small, next_col)
+            cy, align = self._slot(cur, cy_top, cy_bot)
+            self._draw_word_line(p, lines[cur], x, cy, w, font, now, align, margin)
+            if cur + 1 < len(lines):          # 下一行提前显示在另一槽位(全底色候着)
+                cy2, align2 = self._slot(cur + 1, cy_top, cy_bot)
+                self._draw_word_line(p, lines[cur + 1], x, cy2, w, font, now, align2, margin)
             return
 
-        # 无活跃行:即将唱的那行始终提前显示(等着);前奏显示歌名;长间奏末尾给圆点
+        # 无活跃行:即将唱的行 nxt(+后一行)提前显示;前奏显歌名;前奏/长间奏给圆点
         nxt = next((i for i, ln in enumerate(lines) if ln.start > now), None)
         if nxt is None:
             return
         remain = lines[nxt].start - now
         gap = (lines[nxt].start if nxt == 0
-               else lines[nxt].start - lines[nxt - 1].end)   # 本行前的空档
-        # 长间奏:整段就摆好圆点(远处全亮,最后 LEAD 秒才逐个熄灭)
-        show_dots = gap >= self.GAP_FOR_DOTS
-        # 前奏(首行前)整段显示 歌名 - 歌手
-        if nxt == 0:
+               else lines[nxt].start - lines[nxt - 1].end)
+        cy, align = self._slot(nxt, cy_top, cy_bot)
+        if nxt == 0:                          # 前奏:歌名显示在上方居中
             self._draw_plain_line(p, "♪ %s - %s" % (self.song.title, self.song.artist),
-                                  x, cy_big - line_h * 2.15, w, small,
-                                  QtGui.QColor(120, 230, 255))
-        if show_dots:
-            self._draw_lead_dots(p, x, cy_big - line_h * 1.05, w, remain, self.LEAD)
-        # now < 行首,逐字 frac=0 → 全底色,起唱瞬间无缝接上高亮
-        self._draw_word_line(p, lines[nxt], x, cy_big, w, big, now)
+                                  x, cy_top - lh * 1.9, w, self.font_small,
+                                  QtGui.QColor(120, 230, 255), "center", margin)
+        self._draw_word_line(p, lines[nxt], x, cy, w, font, now, align, margin)
         if nxt + 1 < len(lines):
-            self._draw_plain_line(p, lines[nxt + 1].text, x, cy_next, w,
-                                  small, next_col)
+            cy2, align2 = self._slot(nxt + 1, cy_top, cy_bot)
+            self._draw_word_line(p, lines[nxt + 1], x, cy2, w, font, now, align2, margin)
+        if gap >= self.GAP_FOR_DOTS:          # 前奏/长间奏:圆点放在即将唱那行的顶部
+            ent = self._word_entry(lines[nxt], font)
+            lx = self._align_x(x, w, ent["total"], align, margin)
+            self._draw_lead_dots(p, lx, cy - dots_dy, remain, self.LEAD)
 
-    def _draw_lead_dots(self, p, x, cy, w, remain, lead):
-        """KTV 引导圆点:长间奏整段就摆好(remain≥lead 时全亮),最后 lead 秒内逐个熄灭。"""
+    def _draw_lead_dots(self, p, left_x, cy, remain, lead):
+        """KTV 引导圆点:长间奏整段就摆好(remain≥lead 时全亮),最后 lead 秒内逐个熄灭。
+        从 left_x 起横排(放在即将唱那行的顶部、与行首对齐)。"""
         n = 4
         lit = n if remain >= lead else int(np.ceil(remain / lead * n))
         lit = max(0, min(n, lit))
-        r = max(6, self.height() * 0.014)
+        r = max(6, self.height() * 0.012)
         gap = r * 3.2
-        sx = x + w / 2 - (n - 1) * gap / 2
         p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0), 2))
         for i in range(n):
             on = i < lit
             p.setBrush(QtGui.QColor(80, 220, 255) if on else QtGui.QColor(70, 70, 70))
-            p.drawEllipse(QtCore.QPointF(sx + i * gap, cy), r, r)
+            p.drawEllipse(QtCore.QPointF(left_x + r + i * gap, cy), r, r)
 
     @staticmethod
     def _outlined(p, path, fill, ow=4):
@@ -320,9 +339,9 @@ class KaraokeWindow(QtWidgets.QWidget):
                 del self._word_cache[next(iter(self._word_cache))]
         return ent
 
-    def _draw_word_line(self, p, line, x, cy, w, font, now):
+    def _draw_word_line(self, p, line, x, cy, w, font, now, align="center", margin=0):
         ent = self._word_entry(line, font)
-        left = x + (w - ent["total"]) / 2 - self.PAD
+        left = self._align_x(x, w, ent["total"], align, margin) - self.PAD
         top = cy + ent["ascent"] * 0.35 - ent["ascent"] - self.PAD
         p.drawPixmap(QtCore.QPointF(left, top), ent["base"])
         hi = 0.0                       # 已唱进度的像素宽(整行累计,词内按时间线性)
@@ -342,7 +361,7 @@ class KaraokeWindow(QtWidgets.QWidget):
             p.drawPixmap(QtCore.QPointF(left, top), ent["hi"])
             p.restore()
 
-    def _draw_plain_line(self, p, text, x, cy, w, font, col):
+    def _draw_plain_line(self, p, text, x, cy, w, font, col, align="center", margin=0):
         key = (text, font.pointSizeF(), col.rgba())
         ent = self._plain_cache.get(key)
         if ent is None:
@@ -353,7 +372,8 @@ class KaraokeWindow(QtWidgets.QWidget):
             self._plain_cache[key] = ent
             while len(self._plain_cache) > 8:
                 del self._plain_cache[next(iter(self._plain_cache))]
-        p.drawPixmap(QtCore.QPointF(x + (w - ent["total"]) / 2 - self.PAD,
+        lx = self._align_x(x, w, ent["total"], align, margin)
+        p.drawPixmap(QtCore.QPointF(lx - self.PAD,
                                     cy + ent["ascent"] * 0.35 - ent["ascent"] - self.PAD),
                      ent["pix"])
 

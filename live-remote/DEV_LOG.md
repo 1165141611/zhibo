@@ -380,3 +380,17 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
     重构 `_vol`→`_vol_pct`(档位,`volume_pct` 报它,STATE/手机同步用档位不受影响)+ `_gain`(回调用,平方后)。
     实测:各档位 dB 曲线对照(线性 vs 平方)正确、`volume_pct` 仍报档位、150 夹到 100;重启后 `k_vol=14`
     (作者本就调很低)现增益 0.0196(-34dB)明显更轻。
+- **曲库管理窗改版:每行编辑/播放按钮 + 右侧滚动条 + 播放即切歌**(2026-07-14,作者反馈):
+  - Treeview → **Canvas + 内嵌 Frame + `ttk.Scrollbar`(右侧)**:为了每行放真 `tk.Button`(Treeview 单元格放不了
+    控件)。`inner` 用 grid,列0(歌名)`columnconfigure(weight=1)` 可伸缩,列1歌手/列2时间/列3编辑/列4播放
+    固定;`canvas.create_window` + `<Configure>` 同步 scrollregion 与内层宽度;`bind_all("<MouseWheel>")` 滚轮
+    (本解释器独享)。`refresh()` 销毁重建行,搜索/改名后重列。
+  - **播放按钮 → `k_play_mid(mid)`**:立即 `load`+`play`,**有歌在播则=切歌**(静默,不发 show,同 k_play_next
+    风格);不入队,`_queue` 保持不变(本首自然唱完仍按队列续)。
+  - **移除底部"编辑选中"按钮**(编辑移到每行);编辑仍走子 `Toplevel` + `_build_edit_form`(同根同线程)。
+  - 实测:真实曲库(93首)冒烟——滚动条 mapped、行数正确、点第一行"播放"触发 k_play_mid、"编辑"开预填框、
+    搜"鼓楼"过滤到1首;整屏截图确认布局(歌名|歌手|时间|编辑|播放 对齐,右侧滚动条)正常;server 重启零错误。
+  - **补:行分隔/选中样式**(作者反馈"看不出行边界、点中无选中态"):纯 tk 无 Treeview 的行样式,手动画——
+    每行独立 `Frame`(斑马纹交替底色 #fff/#f4f5f7)+ 悬停高亮(#eaf1fb)+ 点击/播放选中态(#c8e0f8)。
+    每行绑 `<Enter>/<Leave>/<Button-1>` 到行框+各格 Label,`paint(hover)` 按"选中>悬停>底色"重着色;
+    `sel["mid"]` 跨搜索保留。列用行内 grid(列0 `weight=1 minsize=170` 伸缩)保证跨行对齐。截图确认三态清晰。
