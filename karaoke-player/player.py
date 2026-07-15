@@ -92,8 +92,21 @@ class KaraokeWindow(QtWidgets.QWidget):
         self.setlist_y = 24                         # 歌单竖直位置(Ctrl+↑↓ 移动;缓存)
         self._setlist_pix = None                    # 歌单滚动条 pixmap(内容/字体变时重建)
         self.blank = False                          # 空白态:只画全绿背景(隐藏歌词时用,捕获帧=纯绿)
+        # 未演唱态:歌曲已载入但主播还没开唱(进度 0、从未播放)。此时绿幕只出纯绿背景,
+        # 不画歌词/音准线——队列点的第一首、唱完切到的下一首都装在开头暂停(见 pc-service
+        # k_enqueue / k_advance_paused),避免观众提前看到还没开唱那首的词和音高。开唱即解除。
+        self._ever_played = False
         self.status_text = ""
         self._drag_pos = None
+        # 窗口桌面位置记忆:拖动/显隐时记下,下次 show 恢复到关闭时的位置。服务模式下隐藏会销毁
+        # 原生 HWND(见 _hide_and_release)、再 show 时 Qt 会重建到默认位置,故必须显式 move 回来;
+        # 位置经 STATE 上报给 pc-service 存 state_cache.json,服务重启后拉起播放器时再下发 `pos x y`。
+        self._saved_pos = None
+        # 演唱者(主播名):开头标题卡显示"演唱:<名>";pc-service 托盘可改、缓存下发,默认兜底。
+        self.performer = "八门官上"
+        self._title_card = None          # 标题卡 pixmap 缓存(歌名/原唱/演唱/字体 变时重建)
+        self._title_dur = 0              # 本歌标题卡时长(ms;据首句起点算,load 时定)
+        self._dot_y = None               # 音高游标当前 y(平滑滑动;None=未初始化,load 重置)
 
         # 文字渲染缓存:整行预渲染成 QPixmap,每帧只 blit。不能每帧重建字形路径+描边
         # (那样一帧要 30ms+,GUI 线程占着 GIL,sounddevice 的 Python 回调抢不到 GIL
@@ -129,6 +142,8 @@ class KaraokeWindow(QtWidgets.QWidget):
         note_end = song.notes[-1].end if song.notes else 0
         line_end = song.lines[-1].end if song.lines else 0
         self.content_end = max(note_end, line_end)
+        self._compute_slots()               # 预计算 KTV 双行槽位(乐句首在上排)
+        self._compute_title_dur()           # 据首句起点定开头标题卡时长
 
         self._init_ui()
         self.timer = QtCore.QTimer(self)
@@ -161,6 +176,7 @@ class KaraokeWindow(QtWidgets.QWidget):
         self._word_cache.clear()
         self._plain_cache.clear()
         self._setlist_pix = None        # 歌单用 font_small,字体变了要重建
+        self._title_card = None         # 标题卡用同族字体,字体变了要重建
 
     def _flash_status(self, text, ms=2000):
         """左下角状态栏临时提示(如切字体),ms 后若没被新提示替换则清掉。"""
@@ -193,12 +209,21 @@ class KaraokeWindow(QtWidgets.QWidget):
             self._status_cache = None
             self._hotkey_pix = None
             self._setlist_pix = None
+            self._title_card = None
 
         now = self.engine.current_ms()
+        if self.engine.playing:             # 一旦开唱就记住:之后暂停在半途仍算"演唱中",照常显示
+            self._ever_played = True
+        unsung = not self._ever_played      # 未演唱(载入待唱):不画歌词/音准线,只留背景
+        # 开头标题卡阶段:开唱后前几秒(now<title_dur)居中显示 歌名/原唱/演唱,渐隐后再出歌词+音准线
+        in_title = (not unsung) and self._title_dur > 0 and now < self._title_dur
         pitch_top, pitch_h, cy_top = self._layout()
-        if self.show_pitch:                 # 音准线可显隐(手机遥控 + 缓存)
-            self._draw_pitch(p, 0, pitch_top, w, pitch_h, now)
-        self._draw_lyrics(p, 0, cy_top, w, now)
+        if in_title:
+            self._draw_title_card(p, w, h, self._title_alpha(now))
+        elif not unsung:
+            if self.show_pitch:             # 音准线可显隐(手机遥控 + 缓存)
+                self._draw_pitch(p, 0, pitch_top, w, pitch_h, now)
+            self._draw_lyrics(p, 0, cy_top, w, now)
         if self.show_setlist:               # 顶端滚动歌单(O 键;下边界=音轨顶,不覆盖)
             self._draw_setlist(p, w)
         self._draw_status(p, w, h, now)
@@ -218,13 +243,17 @@ class KaraokeWindow(QtWidgets.QWidget):
         if self._setlist_pix is None:
             if not self.setlist_titles:
                 return None
-            sep = "　　"            # 两个全角空格 ≈ 两个字间距
+            sep = "　"             # 一个全角空格(原两个,间隔缩小一半)
             text = sep.join(self.setlist_titles) + sep
             fm = QtGui.QFontMetrics(self.font_small)
             total = fm.horizontalAdvance(text)
+            # 样式统一为"未唱歌词"款:白底 + 黑描边(比原 1px 更像 KTV 字幕),描边宽按字号
+            # 从歌词的 OW_BLACK 等比缩小(font_small 比 font_big 小),视觉权重与歌词一致。
+            ow = max(2, round(self.OW_BLACK * self.font_small.pointSizeF()
+                              / max(1.0, self.font_big.pointSizeF())))
             self._setlist_pix = (total, fm.height(),
                                  self._make_line_pixmap([(text, total)], self.font_small,
-                                                        QtGui.QColor(245, 245, 245), 1))
+                                                        self.COL_UNSUNG, ow))
         return self._setlist_pix
 
     def _setlist_h(self):
@@ -271,19 +300,15 @@ class KaraokeWindow(QtWidgets.QWidget):
         ppms = 0.18                                 # 像素/毫秒
         pad = max(4, int(h * 0.12))
         top, bh = y + pad, h - 2 * pad
-        # 音准线只表示原唱旋律"趋势",不随升降调移动;整体压扁在≤两行歌词高内
+        # 音准线只表示原唱旋律"趋势",不随升降调移动;整体压扁在≤两行歌词高内。
+        # 起唱竖线已移除,改为下面的"音高游标"白色亮点。
 
-        # playhead 竖线(不透明,带深色以便抠图);尾奏(过了最后音符/歌词)后隐藏
-        if now <= self.content_end:
-            p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255), 2))
-            p.drawLine(int(playhead), int(y), int(playhead), int(y + h))
-
-        # 音准块描边:细 1px + 柔和深蓝灰(非纯黑)。仍非绿、够暗,绿幕能干净抠;但缩到手机屏
-        # 后不再是刺眼的粗黑线。(歌词/圆点的黑描边不动,只淡化音准线)
-        outline = QtGui.QPen(QtGui.QColor(45, 55, 70), 1)
+        # 音准块描边:黑,粗细与歌词笔画看齐(不再淡化);未唱=白、已唱(播放头左侧)=蓝
+        outline = QtGui.QPen(QtGui.QColor(0, 0, 0), self.PITCH_OW)
+        outline.setJoinStyle(QtCore.Qt.RoundJoin)
         white = QtGui.QColor(245, 245, 245)          # 未唱=白(同歌词底色)
-        blue = QtGui.QColor(80, 220, 255)            # 已唱=蓝(同歌词高亮)
-        bar_h = 7.2                                  # 比原 6 粗约 20%
+        blue = QtGui.QColor(80, 220, 255)            # 已唱=蓝(旋律高亮,暂沿用青)
+        bar_h = self.PITCH_BAR_H
         for n in self.song.notes:
             nx = playhead + (n.start - now) * ppms
             nw = max(3, n.dur * ppms)
@@ -302,10 +327,132 @@ class KaraokeWindow(QtWidgets.QWidget):
                 p.setBrush(blue)
                 p.drawRoundedRect(rect, 3, 3)
                 p.restore()
+        # 音高游标:白色圆形亮点 + 柔和光晕,高度随当前音符上下移动,无音符落到底部等待
+        self._draw_pitch_cursor(p, playhead, top, bh, bar_h, now)
+
+    def _draw_pitch_cursor(self, p, cx, top, bh, bar_h, now):
+        """播放头处的白色圆形"音高游标":直径稍大于音准线粗细,带柔和光晕(径向渐变)。
+        其 y 高度=当前时刻所在音符的音高;无音符(间奏/尾奏)→ 平滑落到底部等待。
+        平滑:每帧朝目标插值,像弹跳小球上下滑动。"""
+        target = top + bh                            # 默认底部(无音符时落底)
+        for n in self.song.notes:
+            if n.start <= now < n.end:
+                target = self._midi_to_y(n.midi, top, bh)
+                break
+            if n.start > now:                        # 音符按 start 排序,过了当前时刻即停
+                break
+        if self._dot_y is None:
+            self._dot_y = target
+        else:
+            self._dot_y += (target - self._dot_y) * 0.25   # 帧驱动平滑滑动
+        dy = self._dot_y
+        thick = bar_h + self.PITCH_OW                # 音准线总粗
+        r_dot = thick * 0.65                         # 直径≈1.3×总粗,稍大于音准线粗细
+        glow_r = r_dot * 2.6
+        grad = QtGui.QRadialGradient(cx, dy, glow_r)  # 白亮心 → 外圈透明的柔和光晕
+        grad.setColorAt(0.0, QtGui.QColor(255, 255, 255, 210))
+        grad.setColorAt(0.32, QtGui.QColor(255, 255, 255, 120))
+        grad.setColorAt(1.0, QtGui.QColor(255, 255, 255, 0))
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QBrush(grad))
+        p.drawEllipse(QtCore.QPointF(cx, dy), glow_r, glow_r)
+        p.setBrush(QtGui.QColor(255, 255, 255))       # 实心白亮点(不透明,绿幕干净抠)
+        p.drawEllipse(QtCore.QPointF(cx, dy), r_dot, r_dot)
+
+    # ---------------------------------------------------- 开头标题卡
+    def _compute_title_dur(self):
+        """标题卡时长:据首句起点定,标题卡在首句前 ~600ms 之前收完(不压到第一句歌词);
+        无歌词则用 TITLE_MAX。首句太早(<~600ms)则不显标题(=0)。"""
+        first = self.song.lines[0].start if self.song.lines else None
+        if first is None:
+            self._title_dur = self.TITLE_MAX
+        else:
+            self._title_dur = min(self.TITLE_MAX, max(0, first - 600))
+
+    def _title_alpha(self, now):
+        """标题卡透明度:淡入 → 常显 → 淡出(据 now 在 [0, title_dur] 的位置)。"""
+        d = self._title_dur
+        if d <= 0:
+            return 0.0
+        fi = min(self.TITLE_FADE_IN, d * 0.3)
+        fo = min(self.TITLE_FADE_OUT, d * 0.4)
+        if fi > 0 and now < fi:
+            return now / fi
+        if fo > 0 and now > d - fo:
+            return max(0.0, (d - now) / fo)
+        return 1.0
+
+    def _title_entry(self):
+        """构建/缓存标题卡各行 pixmap(经典 KTV 蓝底白描边,同已唱歌词;字号比歌词放大)。
+        行 = 歌名(大) / 原唱:<歌手>(有才显) / 演唱:<主播名>。返回 {items, total_h}。"""
+        if self._title_card is not None:
+            return self._title_card
+        title = (self.song.title or "").strip()
+        if not title:
+            return None
+        fam = self.font_big.family()
+        bold = self.font_big.bold()
+        tf = QtGui.QFont(fam, 46); tf.setBold(bold)     # 歌名(大)
+        cf = QtGui.QFont(fam, 26); cf.setBold(bold)     # 原唱/演唱(中)
+
+        def mk(text, font):
+            fm = QtGui.QFontMetrics(font)
+            total = fm.horizontalAdvance(text)
+            scale = font.pointSizeF() / max(1.0, self.font_big.pointSizeF())
+            ob = max(2, round(self.OW_BLACK * scale))   # 描边宽按字号等比放大
+            ow = max(1, round(self.OW_WHITE * scale))
+            pix = self._make_line_pixmap(
+                [(text, total)], font, self.COL_SUNG,
+                strokes=[(self.COL_OUTLINE, ob), (self.COL_SUNG_OUTLINE, ow)])
+            return [pix, total, fm.height()]
+
+        items = []                                       # [pix, 宽, 高, 行后步进(下一行 y 增量)]
+        t = mk(title, tf)
+        items.append(t + [t[2] * 1.15])                  # 标题占满一行高 + 半行间隔再接原唱
+        artist = (self.song.artist or "").strip()
+        if artist:
+            c = mk("原唱：" + artist, cf)
+            items.append(c + [c[2] * 1.08])
+        perf = (self.performer or "").strip() or "八门官上"
+        c = mk("演唱：" + perf, cf)
+        items.append(c + [c[2] * 1.08])
+        total_h = sum(it[3] for it in items[:-1]) + items[-1][2]   # 末行不计行后步进
+        self._title_card = {"items": items, "total_h": total_h}
+        return self._title_card
+
+    def _main_area(self):
+        """主区域(顶端歌单下沿 ~ 底部歌词上沿)的竖直范围 (top, bottom)——标题卡据此居中,
+        而非整窗居中,也不是到音准带顶(那会偏上)。直播捕获的就是歌单与底部歌词之间这整块,
+        标题卡阶段歌词/音准线都不画,故下界取歌词行顶 `cy_top`,居中才落在画面中间。"""
+        if self.show_setlist and self.setlist_titles:
+            top = self.setlist_y + self._setlist_h()
+        else:
+            top = 24
+        _, _, cy_top = self._layout()
+        return top, max(top + 1, cy_top)
+
+    def _draw_title_card(self, p, w, h, alpha):
+        """在**主区域**(歌单下沿 ~ 歌词上沿)内**居中**画标题卡,整体按 alpha 渐隐
+        (绿幕下靠直播伴侣抠像羽化合成软淡入淡出)。"""
+        if alpha <= 0:
+            return
+        ent = self._title_entry()
+        if not ent:
+            return
+        area_top, area_bottom = self._main_area()
+        avail = area_bottom - area_top
+        yy = area_top + max(0.0, (avail - ent["total_h"]) * 0.5)   # 主区域正中
+        p.save()
+        p.setOpacity(alpha)
+        for pix, pw, ph, adv in ent["items"]:
+            p.drawPixmap(QtCore.QPointF((w - pw) / 2 - self.PAD, yy - self.PAD), pix)
+            yy += adv
+        p.restore()
 
     # 引导圆点:仅前奏/长间奏出现(空档≥此值,单位ms);句间正常小停顿不显示
     GAP_FOR_DOTS = 8000
     LEAD = 3500          # 圆点倒计时提前量(ms)
+    PHRASE_GAP = 4000    # 空档≥此值=新乐句起点(其首行回到上排,阅读顺序才顺)
 
     @staticmethod
     def _align_x(x, w, total, align, margin):
@@ -316,9 +463,21 @@ class KaraokeWindow(QtWidgets.QWidget):
             return x + w - margin - total
         return x + (w - total) / 2
 
-    def _slot(self, i, cy_top, cy_bot):
-        """KTV 交替槽位:偶数行→上行/左对齐,奇数行→下行/右对齐(上下交替、左右错开)。"""
-        return (cy_top, "left") if i % 2 == 0 else (cy_bot, "right")
+    def _compute_slots(self):
+        """预计算每行的槽位与"乐句起点":大空档(≥PHRASE_GAP)后回到上排(0),句内左右交替。
+        这样一段的首句总在上排(顺读)、句内两行永远异槽(不重叠)、起唱不跳位。"""
+        lines = self.song.lines
+        self._line_slot = [0] * len(lines)     # 0=上行/左对齐,1=下行/右对齐
+        self._line_pstart = [False] * len(lines)   # 是否新乐句起点(大空档后)
+        for i, ln in enumerate(lines):
+            if i == 0:
+                self._line_pstart[i] = True
+                self._line_slot[i] = 0
+            elif ln.start - lines[i - 1].end >= self.PHRASE_GAP:
+                self._line_pstart[i] = True
+                self._line_slot[i] = 0                       # 乐句首→上排
+            else:
+                self._line_slot[i] = 1 - self._line_slot[i - 1]   # 句内交替
 
     def _draw_lyrics(self, p, x, cy_top, w, now):
         lines = self.song.lines
@@ -330,6 +489,9 @@ class KaraokeWindow(QtWidgets.QWidget):
         cy_bot = cy_top + lh * 1.15          # 下行略低于上行,左右错开
         dots_dy = lh * 0.9                   # 圆点在所属行顶部上方
 
+        def pos(i):                          # 行 i 的槽位(用预计算表:乐句首在上排)
+            return (cy_top, "left") if self._line_slot[i] == 0 else (cy_bot, "right")
+
         # 当前活跃行(唱中或刚唱完 300ms 内)
         cur = None
         for i, ln in enumerate(lines):
@@ -339,64 +501,99 @@ class KaraokeWindow(QtWidgets.QWidget):
                 break
 
         if cur is not None:
-            cy, align = self._slot(cur, cy_top, cy_bot)
+            cy, align = pos(cur)
             self._draw_word_line(p, lines[cur], x, cy, w, font, now, align, margin)
-            if cur + 1 < len(lines):          # 下一行提前显示在另一槽位(全底色候着)
-                cy2, align2 = self._slot(cur + 1, cy_top, cy_bot)
-                self._draw_word_line(p, lines[cur + 1], x, cy2, w, font, now, align2, margin)
+            j = cur + 1                       # 后一行仅"同乐句"才提前显示(远句不显,避免重叠)
+            if j < len(lines) and not self._line_pstart[j]:
+                cy2, align2 = pos(j)
+                self._draw_word_line(p, lines[j], x, cy2, w, font, now, align2, margin)
             return
 
-        # 无活跃行:即将唱的行 nxt(+后一行)提前显示;前奏显歌名;前奏/长间奏给圆点
+        # 无活跃行:即将唱的行 nxt(+同乐句后一行)提前显示;前奏显歌名;前奏/长间奏给圆点
         nxt = next((i for i, ln in enumerate(lines) if ln.start > now), None)
         if nxt is None:
             return
         remain = lines[nxt].start - now
         gap = (lines[nxt].start if nxt == 0
                else lines[nxt].start - lines[nxt - 1].end)
-        cy, align = self._slot(nxt, cy_top, cy_bot)
-        if nxt == 0:                          # 前奏:歌名显示在上方居中
-            self._draw_plain_line(p, "♪ %s - %s" % (self.song.title, self.song.artist),
-                                  x, cy_top - lh * 1.9, w, self.font_small,
-                                  QtGui.QColor(120, 230, 255), "center", margin)
+        cy, align = pos(nxt)                  # nxt 若为乐句首(大空档后)→ 上排,顺读
+        # (前奏歌名不再在此显示——开头已有居中"标题卡"承载歌名/原唱/演唱,旧的 ♪歌名-歌手 预告已移除)
         self._draw_word_line(p, lines[nxt], x, cy, w, font, now, align, margin)
-        if nxt + 1 < len(lines):
-            cy2, align2 = self._slot(nxt + 1, cy_top, cy_bot)
-            self._draw_word_line(p, lines[nxt + 1], x, cy2, w, font, now, align2, margin)
-        if gap >= self.GAP_FOR_DOTS:          # 前奏/长间奏:圆点放在即将唱那行的顶部
+        j = nxt + 1
+        if j < len(lines) and not self._line_pstart[j]:
+            cy2, align2 = pos(j)
+            self._draw_word_line(p, lines[j], x, cy2, w, font, now, align2, margin)
+        if gap >= self.GAP_FOR_DOTS:          # 长间奏/前奏:此时 nxt 必是乐句首=上排,圆点贴其句首上方
             ent = self._word_entry(lines[nxt], font)
             lx = self._align_x(x, w, ent["total"], align, margin)
             self._draw_lead_dots(p, lx, cy - dots_dy, remain, self.LEAD)
 
     def _draw_lead_dots(self, p, left_x, cy, remain, lead):
-        """KTV 引导圆点:长间奏整段就摆好(remain≥lead 时全亮),最后 lead 秒内逐个熄灭。
+        """KTV 引导圆点:长间奏整段就摆好 n 个,最后 lead 秒内**逐个消失**(不是变色/变填充)——
+        剩余越少画得越少,还亮着的那些原样保留、位置不动。**开唱前留一个空拍**:把 lead 分成 n 个
+        圆点 + 1 个空拍(slot=lead/(n+1)),所有圆点在开唱前 slot ms 就消失完,空一拍后才起唱
+        (不再是"最后一个圆点消失与第一句开始重叠")。配色同已唱歌词:蓝底 + 白描边 + 黑 keyline
+        (最外黑,绿幕干净抠)。大小按行高约 0.55 倍直径,与图片中圆点/文字比例一致。
         从 left_x 起横排(放在即将唱那行的顶部、与行首对齐)。"""
         n = 4
-        lit = n if remain >= lead else int(np.ceil(remain / lead * n))
+        slot = lead / (n + 1)              # n 个圆点 + 1 个空拍;圆点在开唱前 slot ms 全部消失
+        eff = remain - slot                # 空拍:开唱前 slot 内不显圆点
+        if eff <= 0:
+            lit = 0
+        elif eff >= lead - slot:
+            lit = n
+        else:
+            lit = int(np.ceil(eff / (lead - slot) * n))
         lit = max(0, min(n, lit))
-        r = max(6, self.height() * 0.012)
-        gap = r * 3.2
-        p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0), 2))
-        for i in range(n):
-            on = i < lit
-            p.setBrush(QtGui.QColor(80, 220, 255) if on else QtGui.QColor(70, 70, 70))
-            p.drawEllipse(QtCore.QPointF(left_x + r + i * gap, cy), r, r)
+        r = self._line_h * 0.28                 # 半径≈0.28×行高 → 直径≈0.55×行高(仿图片比例)
+        gap = r * 2.9                           # 圆心间距(留出白描边+黑边不相撞)
+        kw = max(1.0, r * 0.12)                 # 黑 keyline 宽(外圈)
+        ww = max(1.5, r * 0.22)                 # 白描边宽(中圈)
+        p.setPen(QtCore.Qt.NoPen)
+        for i in range(lit):                    # 只画还亮着的,其余不画=已消失
+            c = QtCore.QPointF(left_x + r + i * gap, cy)
+            p.setBrush(self.COL_OUTLINE);       p.drawEllipse(c, r + ww + kw, r + ww + kw)
+            p.setBrush(self.COL_SUNG_OUTLINE);  p.drawEllipse(c, r + ww, r + ww)
+            p.setBrush(self.COL_SUNG);          p.drawEllipse(c, r, r)
+
+    # ── 经典 KTV 字幕配色(2026-07-15)──────────────────────────────────────
+    # 未唱=白底黑描边;已唱=蓝底白描边。绿幕边界:最外一圈始终是黑(抗锯齿边缘落在黑上,
+    # 绿幕可干净抠),已唱的白描边内嵌在黑 keyline 里(否则白直接贴绿,抠像会留绿边)。
+    # 两态外轮廓总宽相同(都是 OW_BLACK),逐字擦除的裁剪边界才对得齐、无台阶。
+    COL_UNSUNG = QtGui.QColor(255, 255, 255)        # 未唱填充:白
+    COL_SUNG = QtGui.QColor(28, 42, 205)            # 已唱填充:经典 KTV 蓝
+    COL_OUTLINE = QtGui.QColor(0, 0, 0)             # 黑(未唱主描边 / 已唱最外 keyline)
+    COL_SUNG_OUTLINE = QtGui.QColor(255, 255, 255)  # 已唱描边:白
+    OW_BLACK = 6                                     # 黑描边/keyline 总宽(px,居中于字形路径)
+    OW_WHITE = 4                                     # 白描边总宽(<OW_BLACK,外圈才露出黑 keyline)
+    # 音准线:粗细/描边与歌词笔画看齐(黑描边,不再淡化);总粗≈bar_h+ow
+    PITCH_BAR_H = 6.0        # 音准块填充高
+    PITCH_OW = 2            # 音准块黑描边宽
+    # 开头标题卡(歌名/原唱/演唱):前几秒居中显示后渐隐,再出歌词/音准线
+    TITLE_MAX = 5500        # 最长显示(ms);实际取 min(此值, 首句起点-600)
+    TITLE_FADE_IN = 400
+    TITLE_FADE_OUT = 1200
 
     @staticmethod
-    def _outlined(p, path, fill, ow=4):
-        """描边(黑)+ 填充,抗锯齿边缘落在黑色上,绿幕可干净抠掉。"""
-        pen = QtGui.QPen(QtGui.QColor(0, 0, 0), ow)
-        pen.setJoinStyle(QtCore.Qt.RoundJoin)
-        p.setPen(pen)
+    def _outlined(p, path, fill, strokes):
+        """按 strokes(由外到内=由宽到窄的 [(颜色,线宽)])逐层描边,最后填 fill。
+        最外层(最宽)保持黑,让抗锯齿边缘落在黑上、绿幕干净抠;更窄的内层在边缘露出一圈
+        (用于'蓝底白描边+黑 keyline'的经典 KTV 描边)。单色黑描边则传单元素 strokes。"""
         p.setBrush(QtCore.Qt.NoBrush)
-        p.drawPath(path)
+        for col, w in strokes:
+            pen = QtGui.QPen(col, w)
+            pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            p.setPen(pen)
+            p.drawPath(path)
         p.setPen(QtCore.Qt.NoPen)
         p.setBrush(fill)
         p.drawPath(path)
 
     PAD = 6   # 文字 pixmap 四周余量:容纳描边宽度+抗锯齿出血
 
-    def _make_line_pixmap(self, words, font, fill, ow):
-        """把一行字(黑描边+fill 填充)渲染成透明底 pixmap;words=[(文本, 步进宽)]。"""
+    def _make_line_pixmap(self, words, font, fill, ow=1, strokes=None):
+        """把一行字(描边+fill 填充)渲染成透明底 pixmap;words=[(文本, 步进宽)]。
+        strokes 给出则按其分层描边(经典 KTV 双色描边);否则退化为单层黑描边(线宽 ow)。"""
         fm = QtGui.QFontMetrics(font)
         pad = self.PAD
         W = max(1, int(sum(a for _, a in words)) + 2 * pad)
@@ -412,7 +609,8 @@ class KaraokeWindow(QtWidgets.QWidget):
         for t, adv in words:
             path.addText(x, pad + fm.ascent(), font, t)
             x += adv
-        self._outlined(p, path, fill, ow)
+        self._outlined(p, path, fill,
+                       strokes if strokes is not None else [(QtGui.QColor(0, 0, 0), ow)])
         p.end()
         return pm
 
@@ -430,8 +628,9 @@ class KaraokeWindow(QtWidgets.QWidget):
                    "total": sum(a for _, a in words),
                    "ascent": fm.ascent(),
                    "H": fm.height() + 2 * self.PAD,
+                   # 未唱:白底 + 黑描边(经典 KTV;外轮廓宽=OW_BLACK,与 hi 对齐)
                    "base": self._make_line_pixmap(words, font,
-                                                  QtGui.QColor(245, 245, 245), 1),
+                                                  self.COL_UNSUNG, self.OW_BLACK),
                    "hi": None, "font": font}
             self._word_cache[key] = ent
             while len(self._word_cache) > 8:     # 有界,防整首歌驻留(本机内存紧)
@@ -451,10 +650,13 @@ class KaraokeWindow(QtWidgets.QWidget):
                 if now > wd.start:
                     hi += adv * (now - wd.start) / max(1, wd.dur)
                 break
-        if hi > 0:      # 高亮版整行盖上,裁剪到进度线;两版描边一致,边界干净
+        if hi > 0:      # 高亮版整行盖上,裁剪到进度线;两版外轮廓同宽,边界干净
             if ent["hi"] is None:
-                ent["hi"] = self._make_line_pixmap(ent["words"], ent["font"],
-                                                   QtGui.QColor(80, 220, 255), 1)
+                # 已唱:蓝底 + 白描边 + 黑 keyline(最外黑,保绿幕边界干净)
+                ent["hi"] = self._make_line_pixmap(
+                    ent["words"], ent["font"], self.COL_SUNG,
+                    strokes=[(self.COL_OUTLINE, self.OW_BLACK),
+                             (self.COL_SUNG_OUTLINE, self.OW_WHITE)])
             p.save()
             p.setClipRect(QtCore.QRectF(left, top, self.PAD + hi, ent["H"]))
             p.drawPixmap(QtCore.QPointF(left, top), ent["hi"])
@@ -605,15 +807,20 @@ class KaraokeWindow(QtWidgets.QWidget):
         self.kongsinger = None
         self.use_vocal = False
         self.semitone = 0
+        self._ever_played = False            # 新歌载入=未演唱:开唱前绿幕不显歌词/音准线
         pit = [n.midi for n in song.notes] or [60]
         self.midi_lo = min(pit) - 2
         self.midi_hi = max(pit) + 2
         note_end = song.notes[-1].end if song.notes else 0
         line_end = song.lines[-1].end if song.lines else 0
         self.content_end = max(note_end, line_end)
+        self._compute_slots()                # 换歌:重算 KTV 双行槽位
+        self._compute_title_dur()            # 换歌:重算开头标题卡时长
         self._word_cache.clear()             # 换歌清文字渲染缓存
         self._plain_cache.clear()
         self._status_cache = None
+        self._title_card = None              # 换歌:标题卡(歌名/原唱)作废,重建
+        self._dot_y = None                   # 换歌:音高游标复位(下次绘制吸附到目标)
         self.engine.load(self.accompany)     # 换源、归位到0、清调、暂停
         self.smtc.set_song(song.title, song.artist, song.duration_ms() / 1000)
         print("[LOAD]", mid, song.title, "-", song.artist, flush=True)
@@ -623,6 +830,10 @@ class KaraokeWindow(QtWidgets.QWidget):
         """定时同步:SMTC(若启用)+ 服务模式下把播放状态/进度上报给 pc-service(stdout)。"""
         self.smtc.set_playing(self.engine.playing)
         self.smtc.update_position(self.engine.current_ms() / 1000)
+        if self.engine.playing:      # 隐藏时也追踪:开唱后再显示窗口不会闪一帧空白
+            self._ever_played = True
+        if self.isVisible():         # 可见时持续记录桌面位置(捕获经其它途径的移动;隐藏时保留旧值)
+            self._saved_pos = (self.x(), self.y())
         if self.service_mode:
             st = {"pos": round(self.engine.current_ms()),
                   "dur": round(self.song.duration_ms()),
@@ -633,6 +844,8 @@ class KaraokeWindow(QtWidgets.QWidget):
                   "setlist_show": self.show_setlist, "setlist_y": self.setlist_y,
                   "mid": self.song.mid, "title": self.song.title,
                   "artist": self.song.artist}
+            if self._saved_pos is not None:   # 有真实位置(显示过 / pc-service 已下发)才上报,免把 (0,0) 缓存进去
+                st["win_x"], st["win_y"] = int(self._saved_pos[0]), int(self._saved_pos[1])
             try:
                 sys.stdout.write("STATE " + json.dumps(st, ensure_ascii=False) + "\n")
                 sys.stdout.flush()
@@ -649,11 +862,16 @@ class KaraokeWindow(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
+        if self.isVisible():
+            self._saved_pos = (self.x(), self.y())   # 拖动结束即记住位置(下次 show 恢复)
 
     def show_lyrics(self):
-        """显示歌词:恢复正常渲染并显示窗口。"""
+        """显示歌词:恢复正常渲染并显示窗口,并把窗口恢复到上次关闭时的桌面位置。
+        服务模式隐藏会销毁原生 HWND,再 show 时 Qt 会放到默认位置,故显式 move 回来。"""
         self.blank = False
         self.show()
+        if self._saved_pos is not None:
+            self.move(*self._saved_pos)
         self.raise_()
         self.activateWindow()      # 取焦点,快捷键才生效
 
@@ -803,6 +1021,19 @@ def main():
                     win.setlist_y = int(arg)
                 except ValueError:
                     pass
+            # 窗口桌面位置(pc-service 据 state_cache.json 在拉起时下发,恢复上次关闭时的位置)
+            elif c == "pos" and arg is not None:
+                try:
+                    xs, ys = arg.split()
+                    win._saved_pos = (int(xs), int(ys))
+                    if win.isVisible():
+                        win.move(*win._saved_pos)
+                except Exception:
+                    pass
+            # 演唱者(主播名):pc-service 托盘可改,开头标题卡显示"演唱:<名>"
+            elif c == "performer" and arg is not None:
+                win.performer = arg
+                win._title_card = None          # 重建标题卡
             # 父进程(pc-service)退出/崩溃 → stdin 关闭,本播放器自退,避免成为关不掉的孤儿
             elif c == "__quit__":
                 QtWidgets.QApplication.quit()

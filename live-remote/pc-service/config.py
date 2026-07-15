@@ -38,9 +38,29 @@ SCENES = {
 FADE_SECONDS = 1.0
 
 # ── 背景音乐(QQ音乐)─────────────────────────────────
-# 用于 pycaw 单独调节音量。QQ音乐 新版声音走的是 MediaSDK_Server.exe 这个音频进程,
-# 老版可能是 QQMusic.exe,这里列一组候选,谁在出声就调谁。
+# 用于 pycaw 单独调节音量。**重大坑(2026-07-14 实锤)**:MediaSDK_Server.exe 是腾讯**共用**
+# 媒体进程——直播伴侣也会起同名子进程,并在 PLAYBACK 3/4(监听)+ VIRTUAL REC 3/4(推流主麦)
+# 上挂着**麦克风链路**的音频会话!按进程名裸匹配会把它们当 QQ音乐 调音量:暂停 BGM 渐弱到 0
+# = 把直播间主麦静音(即"点暂停 BGM 通道就静音"事故;VIRTUAL REC 3/4 音量莫名归零悬案同源)。
+# 因此 server.py 匹配会话时做**归属校验**:QQMUSIC_OWNER_CHECK 里列出的共用进程,必须父进程链
+# (向上 4 级)里含指定归属进程才算 QQ音乐;并优先只在 QQMUSIC_DEVICE_HINT 设备上找会话。
 QQMUSIC_PROCS = ["MediaSDK_Server.exe", "QQMusic.exe"]
+QQMUSIC_OWNER_CHECK = {"MediaSDK_Server.exe": "QQMusic.exe"}   # 共用进程 → 父链须含此进程
+QQMUSIC_DEVICE_HINT = "PLAYBACK 1/2"   # BGM 设备白名单(FriendlyName 含此串);白名单上找不到
+                                       # 任何会话时才退全设备搜(归属校验仍兜底,推流链不受伤)
+
+# ── QQ音乐 传输控制(SMTC / winrt,有方向)────────────────
+# winrt 子进程(smtc_helper.py)按 AUMID 从**所有**系统媒体会话里锁定 QQ音乐 自己的会话,
+# 用它的 try_play/try_pause 做**有方向**控制(不再模拟全局媒体键——媒体键会被路由到"抢占
+# 系统当前会话"的 App:WeSing/浏览器/直播伴侣,是"手机控制 QQ音乐 时好时坏、正在播的歌
+# 不同步"的根因)。下面是会话 AUMID(source_app_user_model_id)的匹配片段(小写子串)。
+# 若发现 BGM 始终锁不到 QQ音乐:看 server.log 里子进程启动时打的 `#SMTC 媒体会话 AUMID: [...]`
+# 那行,把 QQ音乐 对应的那串(的稳定片段)填到这里。
+QQMUSIC_SMTC_HINT = "qqmusic"
+
+# bgm_vol 反向同步:后台周期回读 QQ音乐 音量的间隔(秒),把 PC 上手动改的音量同步回手机。
+# 只在 BGM 在播且不渐变时读,走 pycaw 专线程。
+BGM_VOL_POLL_INTERVAL = 4.0
 
 # ── K歌播放器(独立子进程,由本服务拉起 + 按 HWND 显隐)──
 import os as _os, sys as _sys

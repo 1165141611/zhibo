@@ -95,6 +95,7 @@ private fun App(vm: RemoteViewModel) {
     val st by vm.state.collectAsStateWithLifecycle()
     val library by vm.library.collectAsStateWithLifecycle()
     val lyrics by vm.lyrics.collectAsStateWithLifecycle()
+    val bgmAutoFollow by vm.bgmAutoFollow.collectAsStateWithLifecycle()
 
     var tab by rememberSaveable { mutableStateOf("sing") }
     var showSettings by remember { mutableStateOf(false) }
@@ -154,7 +155,6 @@ private fun App(vm: RemoteViewModel) {
                     "remote" -> RemoteScreen(
                         st = st, host = vm.currentHost(),
                         onScene = vm::setScene, onReset = vm::resetScene,
-                        onBgmPrev = vm::bgmPrev, onBgmToggle = vm::bgmToggle, onBgmNext = vm::bgmNext, onVol = vm::setVolume,
                         onStudio = vm::toggleStudio, onPlayerWin = vm::togglePlayerWindow,
                         onPitch = vm::togglePitch, onSetlist = vm::toggleSetlist,
                         onOpenSettings = { showSettings = true },
@@ -164,9 +164,9 @@ private fun App(vm: RemoteViewModel) {
             TabBar(tab) { tab = it }
         }
 
-        // 悬浮 QQ音乐(除遥控页/设置/抽屉外)
-        if (tab != "remote" && !showSettings && !pickerOpen) {
-            BgmFabOverlay(st, vm::bgmPrev, vm::bgmToggle, vm::bgmNext, vm::setVolume)
+        // 悬浮 QQ音乐(除设置/抽屉外常驻,含遥控页——遥控页不再单列 QQ音乐控制区,统一走这枚悬浮球)
+        if (!showSettings && !pickerOpen) {
+            BgmFabOverlay(st, bgmAutoFollow, vm::bgmPrev, vm::bgmToggle, vm::bgmNext, vm::setVolume, vm::setBgmAutoFollow)
         }
 
         // Toast

@@ -10,6 +10,8 @@ import com.example.liveremote.model.Song
 import com.example.liveremote.model.SongLyrics
 import com.example.liveremote.net.RemoteClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -38,7 +40,21 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     private var prevSinging = false
     private var autoPausedByUs = false
+    private var bgmResumeJob: Job? = null   // 停唱后"延迟 2s 恢复 BGM"的待办;又开唱/手动操作则取消
     private var lastLyricMid = ""
+
+    // 演唱↔BGM 联动总开关(QQ音乐悬浮面板里的"演唱联动"):关掉则开唱/停唱都不碰 QQ音乐。持久化。
+    private val _bgmAutoFollow = MutableStateFlow(prefs.getBoolean("bgm_auto_follow", true))
+    val bgmAutoFollow = _bgmAutoFollow.asStateFlow()
+    fun setBgmAutoFollow(on: Boolean) {
+        prefs.edit().putBoolean("bgm_auto_follow", on).apply()
+        _bgmAutoFollow.value = on
+        if (!on) {                          // 关闭即清场:取消待办恢复,忘掉"是我们暂停的"
+            bgmResumeJob?.cancel(); bgmResumeJob = null
+            autoPausedByUs = false
+        }
+        toast(if (on) "BGM 联动已开启" else "BGM 联动已关闭")
+    }
 
     // 乐观更新抑制窗:本地刚改过 调/音源/进度 后,在这段时间内忽略服务端对该字段的回推,
     // 等播放器把新值上报上来再放行。否则"点击瞬间变了→下一帧 500ms 回推旧值→又变回来"的闪动。
@@ -181,23 +197,35 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 演唱 ↔ 背景音乐联动:开唱自动暂停 QQ音乐,停唱自动恢复(仅恢复我们暂停过的)。 */
+    /** 演唱 ↔ 背景音乐联动:开唱自动暂停 QQ音乐,停唱**留 2 秒缓冲**再自动恢复(仅恢复我们暂停过的)。
+     *  - 全程用有方向的 `bgm pause/play`(服务端幂等):本地 bgmPlaying 若过期也绝不会把媒体键打反。
+     *  - 2s 缓冲内又开唱 → 取消恢复,BGM 保持暂停(autoPausedByUs 维持 true,下次停唱照常恢复)。
+     *  - 总开关 bgmAutoFollow 关闭时完全不介入(prevSinging 仍照常跟踪,重新打开不会误触发)。 */
     private fun interlockBgm(s: AppState) {
         val singing = s.hasSong && s.playing
         if (singing == prevSinging) return
         prevSinging = singing
+        if (!_bgmAutoFollow.value) return
         if (singing) {
+            val resumePending = bgmResumeJob?.isActive == true
+            bgmResumeJob?.cancel(); bgmResumeJob = null
             if (s.bgmPlaying) {
-                client.send("cmd" to "bgm", "action" to "playpause")
+                client.send("cmd" to "bgm", "action" to "pause")
                 autoPausedByUs = true
                 toast("开始演唱 · 已暂停背景音乐")
+            } else if (resumePending) {
+                // 缓冲期内又开唱:BGM 还没来得及恢复,保持"是我们暂停的"记账即可
+                autoPausedByUs = true
             }
         } else {
-            if (autoPausedByUs && !s.bgmPlaying) {
-                client.send("cmd" to "bgm", "action" to "playpause")
-                toast("演唱停止 · 已恢复背景音乐")
+            if (autoPausedByUs) {
+                bgmResumeJob = viewModelScope.launch {
+                    delay(2000)                       // 衔接缓冲:停唱 2 秒后 BGM 才渐入
+                    client.send("cmd" to "bgm", "action" to "play")
+                    autoPausedByUs = false
+                    toast("演唱停止 · 已恢复背景音乐")
+                }
             }
-            autoPausedByUs = false
         }
     }
 
@@ -263,7 +291,13 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     // ───────────────────────── QQ音乐 BGM ─────────────────────────
     fun bgmPrev() = Unit.also { client.send("cmd" to "bgm", "action" to "prev") }
     fun bgmNext() = Unit.also { client.send("cmd" to "bgm", "action" to "next") }
-    fun bgmToggle() { autoPausedByUs = false; client.send("cmd" to "bgm", "action" to "playpause") }
+    fun bgmToggle() {
+        // 手动接管:取消联动的待办恢复、清掉"是我们暂停的"记账,之后由用户说了算;
+        // 联动的自动暂停/恢复下个演唱周期照常工作,不会被手动操作永久打断。
+        bgmResumeJob?.cancel(); bgmResumeJob = null
+        autoPausedByUs = false
+        client.send("cmd" to "bgm", "action" to "playpause")
+    }
     fun setVolume(v: Int) {
         _state.value = _state.value.copy(bgmVol = v)
         client.send("cmd" to "bgm_vol", "value" to v)

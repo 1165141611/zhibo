@@ -3,6 +3,7 @@ package com.example.liveremote.ui.components
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -22,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
@@ -32,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -45,20 +48,39 @@ import kotlinx.coroutines.launch
 fun connColor(connected: Boolean): Color = if (connected) C.Ok else C.Danger
 
 /**
- * 无涟漪点击,但**带按压反馈**:按下时在按钮范围叠一层淡高亮(随 clip 形状裁切),松开淡出。
- * 全 App 的按钮几乎都走这个 modifier,所以在这里统一补按压效果最省事、覆盖最全。
- * 反馈用 drawWithContent 叠加(而非 graphicsLayer 缩放),因此不依赖它在链中的位置,放哪都对。
+ * 无涟漪点击,但**带真实按压手感**。全 App 的按钮几乎都走这个 modifier,所以在这里统一补按压效果
+ * 最省事、覆盖最全。三层反馈叠加,对齐一线 App 的"实体键"体验:
+ *  1. **弹性缩放**:按下即弹到 0.96、松手回弹(spring),像被按进去又弹起来——这是"按下去"的主体现。
+ *     缩放用 graphicsLayer,并**前置**到整条链最外层(`graphicsLayer(...).then(this)`),这样它包住调用方
+ *     的 `clip/background/内容`,是整枚按钮(含底色描边)一起缩,而不是只缩里面的图标/文字。
+ *     graphicsLayer 只影响绘制不改测量,前置不会打乱布局;缩放中心默认取节点正中,任何按钮都对。
+ *  2. **淡高亮**:按下瞬间叠一层白到 10%(随 clip 裁切),松开淡出,补足颜色维度的即时反馈。
+ *  3. **轻触感**:按下那一刻发一次极轻的触感反馈(TextHandleMove),强化"按到了"。
  */
 @Composable
 fun Modifier.noRippleClick(enabled: Boolean = true, onClick: () -> Unit): Modifier {
     val src = remember { MutableInteractionSource() }
     val pressed by src.collectIsPressedAsState()
+    val haptic = LocalHapticFeedback.current
+    // 缩放:弹性回弹给"实体键"手感。dampingRatio 略低(0.55)留一丝回弹,stiffness 偏高按下够跟手。
+    val scale by animateFloatAsState(
+        targetValue = if (pressed && enabled) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = 620f),
+        label = "pressScale",
+    )
+    // 高亮:按下 40ms 快到位,松开 160ms 慢淡出。
     val glow by animateFloatAsState(
         targetValue = if (pressed) 1f else 0f,
         animationSpec = tween(if (pressed) 40 else 160),
-        label = "press",
+        label = "pressGlow",
     )
-    return this
+    // 按下那一刻(非松手)发一次轻触感。
+    LaunchedEffect(pressed) {
+        if (pressed && enabled) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+    }
+    return Modifier
+        .graphicsLayer { scaleX = scale; scaleY = scale }
+        .then(this)
         .clickable(interactionSource = src, indication = null, enabled = enabled) { onClick() }
         .drawWithContent {
             drawContent()

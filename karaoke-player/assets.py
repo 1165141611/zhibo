@@ -6,6 +6,7 @@
 """
 import re
 import os
+import json
 import zlib
 import wave
 import numpy as np
@@ -179,12 +180,30 @@ class Song:
         self.notes = load_notes(self.note_path)
         self._accompany = None
 
+        # 入库时保存的歌名/歌手(pc-service 清洗 + 用户手动改名的结果,存 meta.json)优先于
+        # QRC 原始解析:曲库对脏标题(带 -歌手-ktv 后缀 / 纯数字ID)清洗过、还能手动改名,
+        # 播放器显示必须采用这份,而不是 QRC 的 [ti:]/[ar:] 原文。曲库外(Res 回退)则无此文件。
+        self._named = {}
+        mp = os.path.join(res_dir, mid, "meta.json")
+        if os.path.isfile(mp):
+            try:
+                j = json.load(open(mp, encoding="utf-8"))
+                self._named = {"title": (j.get("title") or "").strip(),
+                               "artist": (j.get("artist") or "").strip()}
+            except Exception:
+                self._named = {}
+
     @property
     def title(self):
-        return self.meta.get("ti", self.mid)
+        # meta.json 有非空歌名 → 用入库保存的;否则回退 QRC 解析,再回退 mid
+        t = self._named.get("title")
+        return t if t else self.meta.get("ti", self.mid)
 
     @property
     def artist(self):
+        # meta.json 存在(哪怕歌手为空,也是入库时清洗后的结果)→ 用它;否则回退 QRC 解析
+        if "artist" in self._named:
+            return self._named["artist"]
         return self.meta.get("ar", "")
 
     def accompany(self) -> np.ndarray:

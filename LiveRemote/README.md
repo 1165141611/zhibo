@@ -12,8 +12,9 @@
 
 1. **演唱**(默认):卡拉OK逐字字幕 + 音准线(Compose Canvas)+ 控制条(声卡快切/步进步退/升降调/音源)。
 2. **队列**(含点歌):演唱中卡片(切下一首)+ 点歌按钮(→ 底部选歌抽屉)+ 长按拖动重排的等待队列。
-3. **遥控**:声卡场景 + QQ音乐 + 窗口开关(Studio One / 滚动歌单 / K歌歌词 / 音准线,均后端同步+缓存)。
-- 全局:可拖动的**悬浮 QQ音乐迷你控制台**、连接状态点/重连横幅、设置页(填电脑 IP)。
+3. **遥控**:声卡场景 + 窗口开关(Studio One / 滚动歌单 / K歌歌词 / 音准线,均后端同步+缓存)。
+   QQ音乐 背景音乐**不再单列控制区**,改由常驻悬浮球统一承载(见下),避免同页两处重复。
+- 全局:可拖动的**悬浮 QQ音乐迷你控制台**(现三页签**含遥控页**均常驻)、连接状态点/重连横幅、设置页(填电脑 IP)。
 
 WebSocket 客户端连 pc-service(`ws://<电脑IP>:8765/ws`),曲库走 `GET /library`。协议见
 [`../live-remote/README.md`](../live-remote/README.md#k歌-api手机点歌控制--阶段-2已接入)。
@@ -51,8 +52,15 @@ WebSocket 客户端连 pc-service(`ws://<电脑IP>:8765/ws`),曲库走 `GET /lib
 > - **音准线几何一律用 dp**(`KaraokeStage` 里 `DP_PER_SEC=60`/`HEAD_RATIO=0.30`/`NOTE_H_DP=10`,DrawScope 内
 >   `.dp.toPx()`)。别用裸设备像素——高 DPI 手机上会又小又挤成一堆散点。音高来自 `GET /song/{mid}/karaoke`
 >   的归一化 `pitch∈[0,1]`,渲染再压进 `[0.12,0.88]` 留上下白边(仿 PC ±2 半音)。
-> - **按压反馈统一在 `noRippleClick`**(`Common.kt`)里用 `drawWithContent` 叠淡高亮实现,全 App 按钮通吃;
->   不要用 `graphicsLayer` 缩放(依赖它在链中的位置,易只缩内容不缩底)。
+> - **音准块高亮对齐 PC 播放器(2026-07-15)**:每块**底色全白(`C.LyricWhite`)=未唱**,落在播放头左侧的部分
+>   `clipRect` 裁出来铺**青色(`C.Accent`)=已唱**,正在唱的块青色填到播放头处——即"唱过染色、没唱是白",
+>   与电脑绿幕播放器 `_draw_pitch` 同法。旧版"未唱蓝底 `NoteIdle` / 仅当前块白填"已废弃。
+> - **按压手感统一在 `noRippleClick`**(`Common.kt`),全 App 按钮通吃,三层叠加做"实体键"效果:
+>   ①**弹性缩放**——按下弹到 0.96、松手回弹(spring),是"按下去"的主体现;②`drawWithContent` 叠淡高亮;
+>   ③按下瞬间一次极轻触感(`TextHandleMove`)。关键实现:缩放的 `graphicsLayer` **前置**到整条链最外层
+>   (`Modifier.graphicsLayer{…}.then(this)`),这样它包住调用方的 `clip/background/内容`,是整枚按钮
+>   (含底色描边)一起缩,而非只缩里面的图标/文字——绕开了"graphicsLayer 依赖链中位置、易只缩内容"的坑。
+>   graphicsLayer 只改绘制不改测量,前置不打乱布局。
 > - **长按确认**用 `HoldToConfirmButton`(如遥控页"归位",按住 2s 进度填满即触发,中途松手取消);
 >   触发瞬间中等震动(`LocalHapticFeedback` LongPress)+ 进度条立即清空。归位后场景全回未选中:
 >   服务端 `reset_scene` 把 `scene=null`,`reduce()` 收到 null 置 0(缺字段才保留旧值),`resetScene()` 另做乐观清零。
@@ -75,6 +83,14 @@ WebSocket 客户端连 pc-service(`ws://<电脑IP>:8765/ws`),曲库走 `GET /lib
 > - **悬浮球位置持久化(2026-07-13)**:`BgmFab` 把球位置按**归一化比例**存 SharedPreferences
 >   (`cfg` 的 `fab_rx/fab_ry`),拖动结束写盘;启动时在 remember 初始化块**同步读回**(prefs 早被
 >   ViewModel 加载,内存命中)→ 首帧渲染前位置已就绪,启动即上次位置、不跳动。展开面板跟随球位置弹出。
+>   球底左右**两枚对称状态点**:右下=BGM 播放状态(绿=播放中/灰=未播放),左下=**演唱联动**状态
+>   (绿=已开启/灰=关闭),不展开面板一眼可辨两态。
+> - **演唱↔BGM 联动 v2(2026-07-14)**:`RemoteViewModel.interlockBgm`——开唱自动暂停 QQ音乐,停唱
+>   **延迟 2s**(`bgmResumeJob` 协程,期间又开唱/手动操作即取消)再自动恢复(仅恢复联动暂停过的)。
+>   全程发**有方向且幂等**的 `{"cmd":"bgm","action":"pause"/"play"}`(服务端已在目标状态则不动)——
+>   不再用无方向 `playpause`,本地 `bgmPlaying` 过期也打不反方向(旧版"手动暂停 BGM 后自动化失灵"即此)。
+>   **联动总开关**在 BGM 悬浮面板底部("演唱联动" Switch),存 `cfg` 的 `bgm_auto_follow`(默认开);
+>   关闭即取消待办恢复+清记账,完全不介入。手动 `bgmToggle` 只取消当次待办,下个演唱周期照常联动。
 > - **返回键(2026-07-13)**:`App` 里统一 `BackHandler`——设置页/点歌抽屉开着时第一优先关浮层;
 >   否则两次返回才退出(第一次弹"再按一次退出程序",2s 内再按 `finish()`),防误触退到桌面。
 > - **演唱页无歌态(2026-07-13)**:`hasSong=false`(队列唱完/空闲)时**不整页替换**——布局保持,声卡快切

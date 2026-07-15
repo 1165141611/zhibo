@@ -26,6 +26,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -92,25 +93,30 @@ private fun PitchArea(playhead: State<Int>, title: String, artist: String, lyric
             // 两条参考线
             drawLine(Color.White.copy(alpha = 0.04f), Offset(0f, h * 0.33f), Offset(w, h * 0.33f))
             drawLine(Color.White.copy(alpha = 0.04f), Offset(0f, h * 0.66f), Offset(w, h * 0.66f))
-            // 音符块(横轴=时间随 dp/秒 滚动,纵轴=归一化音高;高=顶部)
+            // 音符块(横轴=时间随 dp/秒 滚动,纵轴=归一化音高;高=顶部)。
+            // 高亮规则**对齐电脑端播放器**:整块未唱=白,已唱(播放头左侧)=青,
+            // 正在唱的块青色填到播放头处、其余留白——即"唱过染色、没唱是白"。
             for (n in notes) {
                 val x = headX + (n.startMs - posMs) * pxPerMs
                 val bw = (n.durMs * pxPerMs).coerceAtLeast(3.dp.toPx())
                 if (x + bw < 0f || x > w) continue
-                val active = posMs >= n.startMs && posMs < n.startMs + n.durMs
                 // 归一化音高压进 [0.12,0.88],给上下留白(仿 PC 的 ±2 半音余量),不贴边、趋势更柔和
                 val pv = 0.12f + n.pitch * 0.76f
                 val top = padV + (1f - pv) * usableH
+                // 底色全白(未唱)
                 drawRoundRect(
-                    color = if (active) C.Accent else C.NoteIdle,
+                    color = C.LyricWhite,
                     topLeft = Offset(x, top), size = Size(bw, noteH), cornerRadius = r,
                 )
-                if (active) {
-                    val fill = ((posMs - n.startMs).toFloat() / n.durMs).coerceIn(0f, 1f)
-                    drawRoundRect(
-                        color = Color.White.copy(alpha = 0.85f),
-                        topLeft = Offset(x, top), size = Size(bw * fill, noteH), cornerRadius = r,
-                    )
+                // 已唱部分:块中落在播放头左侧的宽度,裁剪后铺青色(与 PC 的 setClipRect 同法)
+                if (x < headX) {
+                    val sungW = (headX - x).coerceIn(0f, bw)
+                    clipRect(left = x, top = 0f, right = x + sungW, bottom = h) {
+                        drawRoundRect(
+                            color = C.Accent,
+                            topLeft = Offset(x, top), size = Size(bw, noteH), cornerRadius = r,
+                        )
+                    }
                 }
             }
             // 播放头竖线 + 圆点

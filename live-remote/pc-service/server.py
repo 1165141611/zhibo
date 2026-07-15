@@ -30,7 +30,8 @@ import comtypes
 from comtypes import CLSCTX_ALL, cast, POINTER
 import psutil
 from pycaw.pycaw import (AudioUtilities, ISimpleAudioVolume,
-                         IAudioSessionManager2, IAudioSessionControl2)
+                         IAudioSessionManager2, IAudioSessionControl2,
+                         IAudioEndpointVolume)
 
 # ── 关键防崩:全局禁用 comtypes 的 GC 自动 Release ──────────────────────────
 # 本进程 comtypes 只用于 pycaw(WASAPI 会话音量)。实测(server.log + Windows 事件日志):
@@ -102,6 +103,8 @@ STATE = {
     "setlist": [],             # 歌单 mid 列表(曲库管理页勾选,跨重启缓存;推给播放器顶端滚动字幕)
     "setlist_visible": True,   # 顶端歌单显隐(播放器 O 键,跨重启缓存)
     "setlist_y": 24,           # 顶端歌单竖直位置(播放器 Ctrl+↑↓,跨重启缓存)
+    "player_x": None, "player_y": None,   # K歌播放器窗口桌面位置(拖动记忆,跨重启缓存)
+    "performer": "八门官上",   # 演唱者(主播名):开头标题卡"演唱:<名>";托盘可改,跨重启缓存
     "k_mid": "", "k_title": "", "k_artist": "",
     "now": None,               # 正在唱 {mid,title,artist} 或 None(空闲)
     "queue": [],               # 等待队列 [{mid,title,artist}...]
@@ -154,6 +157,9 @@ def _save_persist():
                 "setlist": list(STATE.get("setlist", [])),
                 "setlist_visible": bool(STATE.get("setlist_visible", True)),
                 "setlist_y": int(STATE.get("setlist_y", 24)),
+                "player_x": STATE.get("player_x"),
+                "player_y": STATE.get("player_y"),
+                "performer": STATE.get("performer", "八门官上"),
             }
             tmp = PERSIST_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -208,6 +214,14 @@ def _restore_persist():
             STATE["setlist_y"] = int(data["setlist_y"])
         except Exception:
             pass
+    for _k in ("player_x", "player_y"):          # 播放器窗口位置(拉起播放器后统一下发,见 start_player)
+        if data.get(_k) is not None:
+            try:
+                STATE[_k] = int(data[_k])
+            except Exception:
+                pass
+    if (data.get("performer") or "").strip():    # 演唱者(主播名),拉起播放器后下发
+        STATE["performer"] = data["performer"].strip()
     print(f"[PERSIST] 已恢复: scene={STATE['scene']} k_vol={STATE['k_vol']} "
           f"studio_visible={STATE['studio_visible']} pitch_visible={STATE['pitch_visible']} "
           f"mute={_mute_state}")
@@ -275,17 +289,23 @@ def send_scene(scene_id):
 
 
 # ══════════════════════════════════════════════════════════
-#  2) 背景音乐 —— 系统媒体键
+#  2) 背景音乐 —— QQ音乐 传输控制(有方向,经 winrt 子进程)
 # ══════════════════════════════════════════════════════════
-KEYEVENTF_KEYUP = 0x0002
-VK_MEDIA_NEXT = 0xB0
-VK_MEDIA_PREV = 0xB1
-VK_MEDIA_PLAY_PAUSE = 0xB3
-
-
-def _tap_media(vk):
-    ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
-    ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+def _smtc_send(cmd):
+    """把有方向的传输指令(play/pause/next/prev/toggle)写给 winrt 子进程 stdin。
+    子进程按 AUMID 锁定 QQ音乐 会话做 try_play/try_pause 等——**不再用无方向的全局媒体键**:
+    老媒体键会被 Windows 路由到"抢占系统当前会话"的 App(WeSing/浏览器/直播伴侣),
+    正是"手机控制 QQ音乐 时好时坏、方向反打"的根因。子进程死/重启窗口内丢失一次指令可接受
+    (2s 内自动重拉),换来的是有方向、指定目标、绝不打到别的 App。"""
+    p = _smtc_proc
+    if p is None or p.poll() is not None or p.stdin is None:
+        return False
+    try:
+        p.stdin.write(cmd + "\n")
+        p.stdin.flush()
+        return True
+    except Exception:
+        return False
 
 
 # ══════════════════════════════════════════════════════════
@@ -334,6 +354,14 @@ def _pycaw_call(fn, *args):
 # 这台机器是 ROUTIST R2 声卡,QQ音乐 会同时出现在多个虚拟路由(设备)上。
 # 所以要跨"所有活跃设备"找出全部 QQ音乐 会话,音量一起调,谁喂给监听/直播都同步。
 _qq_vols = []  # 缓存:所有匹配到的 ISimpleAudioVolume
+# ── 设备级缓存:哪些设备上见过 QQ音乐 会话 ──────────────────────────────
+# SessionManager 和端点音量接口都是**设备级**的,不随会话销毁失效(ROUTIST 虚拟设备也不会拔插),
+# 可以在"QQ暂停、会话已死"期间提前拿着用。两个用途(都为治"恢复播放炸响"):
+#   ① 恢复播放时只扫这几个设备等新会话(毫秒级),不再全量枚举 35 个设备(一轮几百 ms,慢半拍);
+#   ② 恢复播放**之前**先把这些设备端点静音——新会话纵然默认 100%,也一个采样都放不出来,
+#     等压到 0 再解除静音。全量解析(_resolve_qq_sessions)时顺带刷新这两个缓存。
+_qq_dev_mgrs = []   # [IAudioSessionManager2] 见过 QQ 会话的设备的会话管理器
+_qq_dev_eps = []    # [IAudioEndpointVolume]  同一批设备的端点音量接口(mute 保险丝用)
 # 指针坟场:被丢弃的会话指针**永久持有引用、绝不释放**。QQ暂停/切歌后其 COM 指针悬空,
 # 若任由 GC 触发 comtypes __del__→Release(),就是对已释放内存写 → access violation 连环崩
 # (2026-07-13 实崩:server.log 连环 "access violation writing ..." 后进程死)。
@@ -348,12 +376,52 @@ def _proc_name(pid):
         return ""
 
 
+# pid → (是否QQ音乐, 过期时刻)。归属校验要 psutil 爬父链,较贵;快速轮询 80ms 一拍高频调用,
+# 必须缓存。TTL 60s 防 pid 复用造成的陈旧判定。
+_qq_pid_cache = {}
+
+
+def _is_qq_pid(pid):
+    """该 pid 是否真属于 QQ音乐。**不能只看进程名**:MediaSDK_Server.exe 是腾讯共用进程,
+    直播伴侣也用它挂推流麦克风链路的会话(实锤:按名裸匹配把主麦当 BGM 压到 0 = 直播间静音)。
+    QQMUSIC_OWNER_CHECK 里的共用进程,必须父链(向上 4 级)含指定归属进程(QQMusic.exe)才算。"""
+    hit = _qq_pid_cache.get(pid)
+    now = time.monotonic()
+    if hit is not None and hit[1] > now:
+        return hit[0]
+    name = _proc_name(pid)
+    ok = name in [p.lower() for p in config.QQMUSIC_PROCS]
+    if ok:
+        need = None
+        for shared, owner_ in getattr(config, "QQMUSIC_OWNER_CHECK", {}).items():
+            if name == shared.lower():
+                need = owner_.lower()
+                break
+        if need:
+            ok = False
+            try:
+                q = psutil.Process(pid)
+                for _ in range(4):
+                    q = q.parent()
+                    if q is None:
+                        break
+                    if q.name().lower() == need:
+                        ok = True
+                        break
+            except Exception:
+                ok = False
+    _qq_pid_cache[pid] = (ok, now + 60.0)
+    return ok
+
+
 def _qq_running():
-    """QQ音乐相关进程是否存在。不存在就别去枚举 35 个音频设备(白折腾 COM,还添崩溃面)。"""
-    targets = [p.lower() for p in config.QQMUSIC_PROCS]
+    """QQ音乐 是否在跑(带归属校验)。不在就别去枚举 35 个音频设备(白折腾 COM,还添崩溃面)。"""
     try:
-        for p in psutil.process_iter(["name"]):
-            if (p.info.get("name") or "").lower() in targets:
+        for p in psutil.process_iter(["name", "pid"]):
+            n = (p.info.get("name") or "").lower()
+            if n == "qqmusic.exe":
+                return True
+            if n in [t.lower() for t in config.QQMUSIC_PROCS] and _is_qq_pid(p.info["pid"]):
                 return True
     except Exception:
         pass
@@ -361,30 +429,82 @@ def _qq_running():
 
 
 def _resolve_qq_sessions():
-    """跨所有活跃设备,收集所有 QQ音乐 相关会话的音量接口。"""
+    """收集 QQ音乐 会话的音量接口(**带归属校验**,直播伴侣的同名 MediaSDK_Server 绝不入选);
+    优先只搜 BGM 设备白名单(QQMUSIC_DEVICE_HINT,如 PLAYBACK 1/2),白名单一无所获才退回
+    全设备搜(应对用户改了 QQ 输出设备;归属校验仍兜底,推流链路设备上不会误伤)。
+    顺带刷新设备级缓存(_qq_dev_mgrs/_qq_dev_eps,供恢复播放时快速轮询 + 端点静音保险丝)。"""
+    global _qq_dev_mgrs, _qq_dev_eps
     if not _qq_running():
         return []
     _ensure_com()
-    targets = [p.lower() for p in config.QQMUSIC_PROCS]
-    vols = []
-    try:
-        for d in AudioUtilities.GetAllDevices():
-            if "Active" not in str(d.state):
-                continue
+    hint = (getattr(config, "QQMUSIC_DEVICE_HINT", "") or "").lower()
+
+    def scan(devices):
+        vols, mgrs, eps = [], [], []
+        for d in devices:
             try:
                 mgr = cast(d._dev.Activate(IAudioSessionManager2._iid_, CLSCTX_ALL, None),
                            POINTER(IAudioSessionManager2))
                 senum = mgr.GetSessionEnumerator()
+                found = False
                 for i in range(senum.GetCount()):
                     ctl = senum.GetSession(i)
                     ctl2 = ctl.QueryInterface(IAudioSessionControl2)
-                    if _proc_name(ctl2.GetProcessId()) in targets:
+                    if _is_qq_pid(ctl2.GetProcessId()):
                         vols.append(ctl.QueryInterface(ISimpleAudioVolume))
+                        found = True
+                if found:        # 该设备上有 QQ 会话(哪怕 Inactive 残留)→ 记住设备
+                    mgrs.append(mgr)
+                    try:
+                        eps.append(cast(d._dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None),
+                                        POINTER(IAudioEndpointVolume)))
+                    except Exception:
+                        pass
             except Exception:
                 continue
+        return vols, mgrs, eps
+
+    vols, mgrs, eps = [], [], []
+    try:
+        devs = [d for d in AudioUtilities.GetAllDevices() if "Active" in str(d.state)]
+        hinted = [d for d in devs if hint and hint in str(d.FriendlyName).lower()]
+        if hinted:
+            vols, mgrs, eps = scan(hinted)
+        if not vols:                       # 白名单缺失/一无所获 → 全设备搜兜底
+            vols, mgrs, eps = scan(devs)
     except Exception as e:
         print(f"[VOL] 枚举设备失败: {e}")
+    if mgrs:   # 这轮真的见到 QQ 会话才更新设备缓存;否则保留旧的(QQ 暂停期会话可能全无)
+        _qq_graveyard.extend(_qq_dev_mgrs)
+        _qq_graveyard.extend(_qq_dev_eps)
+        _qq_dev_mgrs, _qq_dev_eps = mgrs, eps
     return vols
+
+
+def _mute_qq_endpoints():
+    """恢复播放前的"保险丝":把见过 QQ 会话的设备端点静音,返回 [(ep, 原mute)] 供恢复。
+    **仅在伴奏静默(k_playing=False)时用**——端点静音会连带掐掉共用 PLAYBACK 1/2 上的伴奏。
+    用途:QQ音乐 恢复播放时会把自己的会话音量**重置回 100%**(QQ 自身行为),端点先静音,
+    等它重置完、我们压回目标音量、再解除静音,恢复瞬间一个 100% 采样都放不出去(防炸响)。"""
+    if not _qq_dev_eps:
+        _resolve_qq_sessions()
+    saved = []
+    for ep in _qq_dev_eps:
+        try:
+            saved.append((ep, bool(ep.GetMute())))
+            ep.SetMute(True, None)
+        except Exception:
+            continue
+    return saved
+
+
+def _restore_qq_endpoints(saved):
+    """恢复端点静音原状(必须在 finally 里调——绝不能把用户设备留在静音态)。"""
+    for ep, was in saved:
+        try:
+            ep.SetMute(was, None)
+        except Exception:
+            pass
 
 
 _QQ_RESOLVE_INTERVAL = 1.5   # 缓存为空时最短重解析间隔(秒)。防高频枚举 35 个设备把 COM 打崩
@@ -428,8 +548,12 @@ def _set_qq_volume_impl(pct):
     return ok
 
 
-def _get_qq_volume_impl():
-    for v in list(_qq_vols_cached()):
+def _get_qq_volume_impl(resolve=True):
+    """读 QQ音乐 音量。resolve=False 时**只读已有缓存指针,绝不触发设备枚举**——本机 35 个虚拟
+    设备,一次全量 _resolve_qq_sessions 可达数秒~25s,会把单条 pycaw 线程整段占死、拖垮所有
+    播放/暂停(bgm_vol 周期轮询就必须用 resolve=False,不能每 4s 引发一次枚举风暴)。"""
+    vols = _qq_vols_cached() if resolve else list(_qq_vols)
+    for v in list(vols):
         try:
             return int(round(v.GetMasterVolume() * 100))
         except Exception:
@@ -473,10 +597,14 @@ def _qq_vol_pump():
             pass
 
 
+_qq_vol_set_at = 0.0       # 最近一次"手机端设音量"的时刻(monotonic);反向轮询据此让路
+
+
 def schedule_qq_volume(v):
     """把设音量丢到 pycaw 线程(合并高频拖动),不阻塞事件循环。"""
-    global _qq_vol_target, _qq_vol_running
+    global _qq_vol_target, _qq_vol_running, _qq_vol_set_at
     v = max(0, min(100, int(v)))
+    _qq_vol_set_at = time.monotonic()      # 记一笔,抑制反向轮询回读旧值(见 schedule_qq_volume_read)
     with _qq_vol_lock:
         _qq_vol_target = v
         if _qq_vol_running:
@@ -490,16 +618,59 @@ def schedule_qq_volume(v):
 
 
 def schedule_qq_volume_read():
-    """异步读一次 QQ音乐 音量,读到就更新 STATE 并推手机。不阻塞事件循环。"""
+    """异步读一次 QQ音乐 音量,读到就更新 STATE 并推手机。不阻塞事件循环。
+    **手机端刚设过音量(3s 内)或还有待应用的设值时不回读**:否则会读到"设置尚未落地的旧值",
+    把手机滑条硬拽回旧数字(用户设 40 → 轮询读到旧 100 → 滑条弹回 100)。反向同步只该同步
+    "PC 上手动改的",不该和手机自己的前向设置打架。"""
     def work():
-        v = _get_qq_volume_impl()
-        if v is not None and STATE.get("bgm_vol") != v:
+        if _qq_vol_target is not None or time.monotonic() - _qq_vol_set_at < 3.0:
+            return                               # 有待应用的设值 / 刚设过 → 让路,不回读
+        v = _get_qq_volume_impl(resolve=False)   # 只读缓存,绝不引发设备枚举(防拖垮 pycaw 线程)
+        # **≥98 的读数不反向同步**:QQ音乐 换歌/恢复时会把会话音量重置回 100,那不是"PC 上手动
+        # 改的",若采信会把 STATE.bgm_vol 冲成 100、连累自动切歌接管拿错目标。用户想要满音量走
+        # 手机滑条前向设(STATE.bgm_vol 照样能到 100),不影响。
+        if v is not None and v < 98 and STATE.get("bgm_vol") != v:
             STATE["bgm_vol"] = v
             _threadsafe_broadcast()
     try:
         _pycaw_exec.submit(work)
     except Exception:
         pass
+
+
+def _reassert_bgm_vol():
+    """自动切歌/换歌后补一次音量接管:QQ 把会话音量重置回 100,这里在 pycaw 专线程把它压回
+    用户设定值(STATE.bgm_vol),~1.8s 内反复设几拍盖过 QQ 的重置(重置是一次性的,设后稳)。
+    自动切歌时新歌已在播、无法预先静音,只能尽快压回缩短炸响窗(配合 smtc_helper 的快速换歌检测)。"""
+    global _qq_vol_set_at
+    target = STATE.get("bgm_vol")
+    if not target or _fading:
+        return
+    _qq_vol_set_at = time.monotonic()   # 抑制反向轮询把 QQ 重置的 100 当 PC 端改动回读
+    def work():
+        for _ in range(6):
+            _set_qq_volume_impl(target)
+            time.sleep(0.3)
+    try:
+        _pycaw_exec.submit(work)
+    except Exception:
+        pass
+
+
+def _start_bgm_vol_poller():
+    """后台线程:周期性回读 QQ音乐 音量,把**在 PC 上手动改的**音量反向同步到手机。
+    只在 BGM 在播且不在渐变时读(渐变自己会管音量,别插一脚);实际读走安全的 pycaw 专线程
+    (schedule_qq_volume_read → 提交给单线程 MTA 执行器),本线程绝不直接碰 COM,与全局
+    '不在主线程调 pycaw' 的稳定性纪律一致。间隔见 config.BGM_VOL_POLL_INTERVAL。
+    读到变化才更新+广播,静止时零额外流量。"""
+    def worker():
+        interval = getattr(config, "BGM_VOL_POLL_INTERVAL", 4.0)
+        while True:
+            time.sleep(interval)
+            if _fading or not STATE.get("bgm_playing"):
+                continue
+            schedule_qq_volume_read()
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # ══════════════════════════════════════════════════════════
@@ -542,6 +713,7 @@ def start_smtc_reader():
             try:
                 _smtc_proc = subprocess.Popen(
                     [sys.executable, helper],
+                    stdin=subprocess.PIPE,   # 父进程经 stdin 下发有方向的传输控制(_smtc_send)
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     creationflags=0x08000000,  # CREATE_NO_WINDOW
                     text=True, encoding="utf-8", errors="replace", env=_env,
@@ -553,16 +725,37 @@ def start_smtc_reader():
                 line = line.strip()
                 if not line:
                     continue
+                if line.startswith("#"):   # 诊断日志(如会话 AUMID 列表),只记不解析
+                    print(line)
+                    continue
                 try:
                     snap = json.loads(line)
                 except Exception:
                     continue
+                # 渐变刚按过媒体键 → 抑制窗内不采信快照里的 bgm_playing(可能是按键前的旧状态,
+                # 会把乐观更新翻回去,导致 playpause 方向反打)。窗外恢复 SMTC 权威。
+                if time.monotonic() < _bgm_smtc_mute_until:
+                    snap.pop("bgm_playing", None)
+                # 自动切歌检测:歌名变 / 进度大幅回退(且在播、不在渐变=非手机点的 next/prev)。
+                # QQ音乐 自动换下一首时同样会把会话音量重置回 100% → 补一次音量接管(手机点的
+                # next/prev 走 _bgm_switch,那时 _fading=True,这里不重复插手)。
+                old_title = STATE.get("bgm_title")
+                old_pos = STATE.get("bgm_pos")
+                new_title = snap.get("bgm_title")
+                new_pos = snap.get("bgm_pos")
+                auto_switch = (
+                    not _fading and STATE.get("bgm_playing") and snap.get("bgm_playing", True)
+                    and ((new_title and old_title and new_title != old_title)
+                         or (new_pos is not None and old_pos is not None and new_pos < old_pos - 5))
+                )
                 changed = any(STATE.get(k) != v for k, v in snap.items())
                 STATE.update(snap)
                 if changed and _clients and _loop is not None:
                     asyncio.run_coroutine_threadsafe(_broadcast(), _loop)
-            # 子进程退出了,稍等重启
-            import time
+                if auto_switch:
+                    _reassert_bgm_vol()   # 自动切歌 → 抢回用户音量(不然新歌 100% 炸响)
+            # 子进程退出了,稍等重启(time 用模块级导入;函数内**绝不能** import time,
+            # 否则 time 变函数局部名,上面 time.monotonic() 会 UnboundLocalError 崩掉读取线程)
             time.sleep(2)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -582,36 +775,65 @@ async def _broadcast():
 
 _fading = False
 
+# SMTC 覆盖抑制窗:渐变刚按下媒体键后,winrt 子进程可能还推来一帧**按键前**的旧快照,
+# 把我们乐观更新的 bgm_playing 翻回去 → 之后 playpause 方向判断反打(媒体键本身无方向,
+# 反一次后播放/暂停全乱,表现为"手动暂停后自动化失灵")。在窗内丢弃快照里的 bgm_playing。
+_bgm_smtc_mute_until = 0.0   # monotonic 时刻;在此之前 SMTC 快照的 bgm_playing 不采信
 
-# 关键:整段渐变**都在专用 pycaw 线程一次跑完**(解析一次会话、用缓存指针逐步调、线程内 sleep),
-# 而不是从异步线程连发几十次 set_qq_volume(每次可能重枚举设备)——后者正是"点歌开唱瞬间服务端闪退"的根源。
-def _fade_out_pause_impl():
-    full = _get_qq_volume_impl() or STATE.get("bgm_vol") or 60
+
+# ── QQ音乐 播放/暂停:在**持久会话**上做纯音量渐变(整段在专用 pycaw 线程一次跑完)──────────
+# 关键事实(2026-07-16 实测):**有方向 SMTC 控制下,QQ音乐 暂停并不销毁音频会话**——它只是转
+# Inactive、音量原样保留,恢复播放沿用同一会话(转回 Active);持有的 ISimpleAudioVolume 指针
+# 暂停期间依旧可读可写(实测:暂停时把它设 30,播放后仍是 30)。所以老那套"暂停即销毁会话→恢复
+# 新会话默认 100% 炸响→端点静音保险丝 + 轮询新会话 + 指针坟场"已无必要(那是**无方向媒体键**
+# 时代 QQ 的行为),而且正是它把这条路搞坏的:
+#   ① 播放要死等"新 Active 会话"轮询 ~3s,整段 ~6s,期间 _fading 把用户后续点击**全丢**
+#      → "暂停后连点播放没反应";
+#   ② 老会话被 graveyard、重解析成默认值 → 音量被打回 100%。
+# 但**实测另一条铁律**:QQ音乐 恢复播放时会把自己的会话音量**重置回 100%**(一次性,恢复后
+# ~1~1.5s 发生;之后再设就稳)。老代码"轮询到会话就压 0 再渐强"压得太早——渐强跑完了 QQ 才重置到
+# 100,于是**最终卡在 100、用户设的音量丢失 + 炸响**(正是本次要修的症状)。
+# 现方案:会话持久(指针不失效),播放时① 先静音设备端点当保险丝(仅伴奏静默时,别掐共用通道的伴奏);
+# ② 有方向 play;③ **等 QQ 那次"重置回100"真的发生**(会话音量跳到≥90 即知),再压 0 接管;
+# ④ 解除端点静音;⑤ 渐强到 full;⑥ 再补设两拍兜底。整段在 pycaw 专线程串行跑。
+def _bgm_fade_impl(target):
+    """在持久的 QQ音乐 会话上做音量渐变。target=True 播放渐强,False 暂停渐弱。返回目标音量 full。"""
+    global _bgm_smtc_mute_until
     steps = 20
     dt = config.FADE_SECONDS / steps if config.FADE_SECONDS > 0 else 0
-    _qq_vols_cached()                       # 解析一次(填缓存),后续步骤复用,不再枚举
-    for i in range(steps - 1, -1, -1):
-        _set_qq_volume_impl(round(full * i / steps))
-        if dt:
-            time.sleep(dt)
-    _tap_media(VK_MEDIA_PLAY_PAUSE)         # 暂停
-    _clear_qq_cache()                       # 暂停后会话指针悬空 → 丢弃,严禁再用(会崩)
-    return full
-
-
-def _play_fade_in_impl():
     full = STATE.get("bgm_vol") or _get_qq_volume_impl() or 60
-    _clear_qq_cache()
-    _tap_media(VK_MEDIA_PLAY_PAUSE)         # 播放(QQ 起新会话)
-    time.sleep(0.2)
-    _clear_qq_cache()                       # 用播放后的新会话
-    steps = 20
-    dt = config.FADE_SECONDS / steps if config.FADE_SECONDS > 0 else 0
-    _qq_vols_cached()
-    for i in range(1, steps + 1):
-        _set_qq_volume_impl(round(full * i / steps))
-        if dt:
-            time.sleep(dt)
+    if target:
+        _bgm_smtc_mute_until = time.monotonic() + config.FADE_SECONDS + 6.0
+        _qq_vols_cached()                        # 确保缓存(持久会话指针)
+        guards = _mute_qq_endpoints() if not STATE.get("k_playing") else []
+        try:
+            _smtc_send("play")                   # 有方向播放(沿用同一持久会话)
+            deadline = time.monotonic() + 2.5    # 等 QQ 的"重置回100"发生(端点已静音,它重置也无声)
+            while time.monotonic() < deadline:
+                v = _get_qq_volume_impl(resolve=False)
+                if v is not None and v >= 90:
+                    break
+                time.sleep(0.1)
+            _set_qq_volume_impl(0)               # 重置已发生 → 压 0 接管(端点还静着,无声)
+        finally:
+            _restore_qq_endpoints(guards)        # 解除端点静音(会话已 0,解除也不炸)
+        for i in range(1, steps + 1):            # 渐强 0→full(QQ 不会再重置,渐强稳稳到位)
+            _set_qq_volume_impl(round(full * i / steps))
+            if dt:
+                time.sleep(dt)
+        _set_qq_volume_impl(full)
+        for _ in range(2):                       # 补设两拍:盖过任何迟到的重置(极少见)
+            time.sleep(0.3)
+            _set_qq_volume_impl(full)
+    else:
+        _bgm_smtc_mute_until = time.monotonic() + config.FADE_SECONDS + 4.0
+        _qq_vols_cached()                        # 解析一次填缓存,后续步骤复用
+        for i in range(steps - 1, -1, -1):
+            _set_qq_volume_impl(round(full * i / steps))
+            if dt:
+                time.sleep(dt)
+        _smtc_send("pause")                      # 渐弱到 0 后有方向暂停(会话转 Inactive,不销毁)
+        _bgm_smtc_mute_until = time.monotonic() + 4.0
     return full
 
 
@@ -620,34 +842,87 @@ async def _run_pycaw(fn):
     return await asyncio.get_running_loop().run_in_executor(_pycaw_exec, fn)
 
 
-async def _fade_out_pause():
-    """渐弱 → 暂停 QQ音乐(整段在 pycaw 线程执行,防 COM 段错误)。"""
-    global _fading
+_bgm_desired = None   # 最新期望播放态(True/False);渐变期间来的新指令只更新它,结束后自动续做
+
+
+async def _bgm_apply(target):
+    """把 BGM 收敛到 target(True=播放渐强 / False=暂停渐弱)。bgm_playing **先乐观翻转并广播**
+    (手机端按钮/联动立刻看到正确方向),音量渐变在 pycaw 线程做。
+    **正在渐变时绝不丢弃后续指令**:只更新期望 _bgm_desired,当前渐变收尾后自动续到最新期望
+    ——治老代码"_fading 期间直接 return 把用户后续点击全丢"导致的"暂停后连点播放没反应、
+    几秒后又自动回到暂停"(那几秒是老的 ~6s 慢渐变 + 丢指令 + SMTC 抑制窗过期后把真实态翻回)。"""
+    global _fading, _bgm_desired
+    _bgm_desired = target
+    if STATE.get("bgm_playing") != target:
+        STATE["bgm_playing"] = target
+        await _broadcast()
     if _fading:
-        return
+        return                          # 正在渐变 → 结束时会 reconcile 到最新 _bgm_desired
     _fading = True
     try:
-        full = await _run_pycaw(_fade_out_pause_impl)
-        STATE["bgm_vol"] = full or STATE.get("bgm_vol") or 60
-        STATE["bgm_playing"] = False
+        while True:
+            tgt = _bgm_desired
+            full = await _run_pycaw(lambda t=tgt: _bgm_fade_impl(t))
+            if tgt:                     # 播放收尾才记目标音量;暂停不动 bgm_vol,滑条保持用户设定
+                STATE["bgm_vol"] = full or STATE.get("bgm_vol") or 60
+            if _bgm_desired == tgt:     # 期间无新指令 → 收敛完成
+                break
     finally:
         _fading = False
     await _broadcast()
 
 
-async def _play_fade_in():
-    """播放 QQ音乐 → 渐强(整段在 pycaw 线程执行)。"""
-    global _fading
+# 切歌(next/prev)也会触发 QQ音乐 那次"会话音量重置回 100%"(实测:切歌后会话音量从 40 变 100
+# 并保持)。老代码切歌只发 transport、不管音量 → 新歌以 100% 炸响、手机音量条也弹回 100。
+# 处理:静音端点当保险丝(仅伴奏静默时)→ 有方向切歌 → 等 QQ 重置发生 → 压回用户音量 → 解静音。
+_bgm_switch_again = False   # 连点切歌:渐变/切歌进行中又来切歌 → 置位,收尾补一次纯音量接管
+
+
+def _bgm_switch_impl(direction):
+    """切歌 + 音量接管。direction 给出则有方向切歌;为 None 只补做音量接管(不再切歌)。返回 full。"""
+    global _bgm_smtc_mute_until
+    full = STATE.get("bgm_vol") or _get_qq_volume_impl() or 60
+    _bgm_smtc_mute_until = time.monotonic() + 5.0
+    _qq_vols_cached()                            # 确保缓存(持久会话指针)
+    guards = _mute_qq_endpoints() if not STATE.get("k_playing") else []
+    try:
+        if direction:
+            _smtc_send(direction)                # 有方向切歌
+        deadline = time.monotonic() + 2.5        # 等 QQ 的"重置回100"发生(端点已静音,新歌炸不出来)
+        while time.monotonic() < deadline:
+            v = _get_qq_volume_impl(resolve=False)
+            if v is not None and v >= 90:
+                break
+            time.sleep(0.1)
+        _set_qq_volume_impl(full)                # 压回用户音量(端点还静着,无声切换)
+    finally:
+        _restore_qq_endpoints(guards)            # 解静音(会话已是 full,新歌以正确音量出声)
+    for _ in range(2):                           # 补设两拍:盖过任何迟到的重置
+        time.sleep(0.3)
+        _set_qq_volume_impl(full)
+    return full
+
+
+async def _bgm_switch(direction):
+    """切歌(next/prev):有方向切 + 接管音量(治切歌后音量被 QQ 重置回 100%)。
+    正忙(渐变/切歌中)时直接发 transport 立即切,并置 _bgm_switch_again,收尾补一次音量接管。"""
+    global _fading, _bgm_switch_again
     if _fading:
+        _smtc_send(direction)
+        _bgm_switch_again = True
         return
     _fading = True
     try:
-        full = await _run_pycaw(_play_fade_in_impl)
+        full = await _run_pycaw(lambda: _bgm_switch_impl(direction))
         STATE["bgm_vol"] = full or STATE.get("bgm_vol") or 60
-        STATE["bgm_playing"] = True
+        await _broadcast()
+        while _bgm_switch_again:                  # 期间又切了(bare)→ 补一次纯音量接管
+            _bgm_switch_again = False
+            full = await _run_pycaw(lambda: _bgm_switch_impl(None))
+            STATE["bgm_vol"] = full or STATE.get("bgm_vol") or 60
+            await _broadcast()
     finally:
         _fading = False
-    await _broadcast()
 
 
 async def _handle_cmd(data):
@@ -660,15 +935,18 @@ async def _handle_cmd(data):
     elif cmd == "bgm":
         action = data.get("action")
         if action == "next":
-            _tap_media(VK_MEDIA_NEXT)
+            asyncio.create_task(_bgm_switch("next"))
         elif action == "prev":
-            _tap_media(VK_MEDIA_PREV)
+            asyncio.create_task(_bgm_switch("prev"))
         elif action == "playpause":
-            # 正在播放→渐弱暂停;已暂停→播放渐强。后台跑,不阻塞。
-            if STATE.get("bgm_playing"):
-                asyncio.create_task(_fade_out_pause())
-            else:
-                asyncio.create_task(_play_fade_in())
+            # 正在播放→渐弱暂停;已暂停→播放渐强。后台跑,不阻塞;指令永不丢(见 _bgm_apply)。
+            asyncio.create_task(_bgm_apply(not STATE.get("bgm_playing")))
+        elif action == "pause":
+            # 有方向的暂停(演唱↔BGM 联动用)。_bgm_apply 内部幂等 + 合并,重复/连点都安全。
+            asyncio.create_task(_bgm_apply(False))
+        elif action == "play":
+            # 有方向的播放(联动恢复用),同上。
+            asyncio.create_task(_bgm_apply(True))
     elif cmd == "reset_scene":
         reset_mute_state()   # 归位:记录重置为全不静音(需你先把 4 条 M 都关掉)
     elif cmd == "studio_toggle":
@@ -846,6 +1124,8 @@ def _player_reader(proc):
                 font_before = STATE.get("k_font")
                 slv_before = STATE.get("setlist_visible")
                 sly_before = STATE.get("setlist_y")
+                px_before = STATE.get("player_x")
+                py_before = STATE.get("player_y")
                 STATE.update({
                     "k_pos": st["pos"], "k_dur": st["dur"], "k_playing": st["playing"],
                     "k_key": st["key"], "k_vocal": st["vocal"], "k_mid": st["mid"],
@@ -855,13 +1135,18 @@ def _player_reader(proc):
                     "k_font": st.get("font", STATE.get("k_font", 0)),
                     "setlist_visible": st.get("setlist_show", STATE.get("setlist_visible", True)),
                     "setlist_y": st.get("setlist_y", STATE.get("setlist_y", 24)),
+                    # 播放器窗口桌面位置(拖动记忆,跨重启缓存;仅缓存,不推手机——纯 PC 侧信息)
+                    "player_x": st.get("win_x", STATE.get("player_x")),
+                    "player_y": st.get("win_y", STATE.get("player_y")),
                     "k_title": st["title"], "k_artist": st["artist"],
                 })
                 if (STATE.get("k_vol") != vol_before                # 有变才写盘(上报每 500ms 一次)
                         or STATE.get("pitch_visible") != pitch_before
                         or STATE.get("k_font") != font_before
                         or STATE.get("setlist_visible") != slv_before
-                        or STATE.get("setlist_y") != sly_before):
+                        or STATE.get("setlist_y") != sly_before
+                        or STATE.get("player_x") != px_before
+                        or STATE.get("player_y") != py_before):
                     _save_persist()
                 # 结束检测:曾在播、现在停、且已到尾 → 切到下一首**开头并暂停**(不自动开唱)。
                 # 只在"结束的正是当前曲"时才自动切,避免与手动切歌(事件循环线程)撞车导致跳一首。
@@ -900,6 +1185,9 @@ def start_player():
         _player_send("font " + str(int(STATE.get("k_font", 0))))
         _player_send("setlist_show " + ("1" if STATE.get("setlist_visible", True) else "0"))
         _player_send("setlist_y " + str(int(STATE.get("setlist_y", 24))))
+        if STATE.get("player_x") is not None and STATE.get("player_y") is not None:
+            _player_send("pos %d %d" % (int(STATE["player_x"]), int(STATE["player_y"])))  # 恢复上次窗口位置
+        _player_send("performer " + str(STATE.get("performer", "八门官上")))   # 演唱者(开头标题卡)
         _push_setlist()          # 歌单内容(据缓存的 mid 列表 → 歌名)
         print("[PLAYER] 已拉起 K歌播放器(隐藏)")
     except Exception as e:
@@ -1056,6 +1344,45 @@ def _open_rename_dialog(mid):
             root.mainloop()
         except Exception as ex:
             print(f"[LIB] 改名对话框失败: {ex}")
+
+    threading.Thread(target=_dlg, daemon=True).start()
+
+
+def _open_performer_dialog():
+    """托盘"演唱者"菜单 → 独立窗口改主播名。保存后更新 STATE + 存盘 + 下发播放器(开头标题卡)+ 刷托盘。
+    独立线程跑 mainloop,绝不阻塞托盘消息泵(同 _open_rename_dialog)。"""
+    def _dlg():
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.title("演唱者 · 直播")
+            root.attributes("-topmost", True)
+            root.resizable(False, False)
+            tk.Label(root, text="演唱者(主播名):").grid(row=0, column=0, padx=10, pady=(14, 8))
+            e = tk.Entry(root, width=24)
+            e.grid(row=0, column=1, padx=10, pady=(14, 8))
+            e.insert(0, STATE.get("performer", "八门官上"))
+
+            def _ok(*_):
+                name = e.get().strip()
+                if name:
+                    STATE["performer"] = name
+                    _save_persist()
+                    _player_send("performer " + name)   # 开头标题卡即时用新名
+                    refresh_tray()
+                    _threadsafe_broadcast()
+                root.destroy()
+
+            tk.Button(root, text="取消", width=8, command=root.destroy).grid(
+                row=1, column=0, padx=10, pady=(0, 12))
+            tk.Button(root, text="保存", width=10, command=_ok).grid(
+                row=1, column=1, padx=10, pady=(0, 12), sticky="e")
+            root.bind("<Return>", _ok)
+            root.after(120, root.focus_force)
+            root.after(150, e.focus_set)
+            root.mainloop()
+        except Exception as ex:
+            print(f"[PERF] 演唱者对话框失败: {ex}")
 
     threading.Thread(target=_dlg, daemon=True).start()
 
@@ -1327,8 +1654,9 @@ def _sync_queue_state():
 
 def k_advance_paused():
     """自然唱完时调用:把下一首装载到**开头并保持暂停**(等主播手动开唱),队空则清空当前曲。
-    这样歌曲间歇 BGM 能顶上——手机端"演唱↔BGM 联动"看到演唱停止,会自动恢复它暂停过的 QQ音乐;
-    主播按播放开唱下一首时,联动又会把 BGM 渐弱暂停。"""
+    这样歌曲间歇 BGM 能顶上——手机端"演唱↔BGM 联动"看到演唱停止,**缓冲 2 秒后**自动恢复它
+    暂停过的 QQ音乐(发有方向的 `bgm play`);主播按播放开唱下一首时,联动又发 `bgm pause`
+    把 BGM 渐弱暂停(缓冲期内开唱则直接取消恢复)。联动可在手机 BGM 悬浮面板一键关闭。"""
     global _now_mid
     if _queue:
         _now_mid = _queue.pop(0)
@@ -1366,14 +1694,17 @@ def k_play_mid(mid):
 
 
 def k_enqueue(mid):
-    """点歌:入队;若当前空闲则立即开唱。"""
+    """点歌:入队;若当前空闲则把这首装到**开头并暂停**(不自动开唱),等主播手动开唱。
+    与"唱完切下一首暂停"(k_advance_paused)一致:队列空时新点的第一首也不自动播,
+    保持 BGM 顶着,由主播按播放键开唱。"""
+    global _now_mid
     if not mid:
         return
     _queue.append(mid)
     if _now_mid is None:
-        k_play_next()
-    else:
-        _sync_queue_state()
+        _now_mid = _queue.pop(0)
+        _player_send("load " + _now_mid)   # load 自带:归位到 0、清调、切回伴奏、暂停
+    _sync_queue_state()
 
 
 def k_remove(idx):
@@ -1447,6 +1778,9 @@ def run_tray(url):
     def on_open_library(icon, item):
         _open_library_browser()        # 打开曲库管理窗(倒序列表 + 搜索 + 编辑)
 
+    def on_edit_performer(icon, item):
+        _open_performer_dialog()       # 编辑演唱者(主播名,开头标题卡用)
+
     # 菜单项文本用可调用;但 pystray-win32 右键弹的是缓存菜单、**不会**在打开时重新求值,
     # 需靠 refresh_tray()→update_menu() 主动刷(见 refresh_tray 注释)。
     menu = pystray.Menu(
@@ -1456,6 +1790,8 @@ def run_tray(url):
             None, enabled=False),
         # 曲库:可点击 → 曲库管理窗(倒序/搜索/编辑歌名歌手)
         pystray.MenuItem(lambda i: f"曲库: {STATE['lib_count']} 首 — 点击管理", on_open_library),
+        # 演唱者(主播名):点击编辑,开头标题卡"演唱:<名>"用
+        pystray.MenuItem(lambda i: f"演唱者：{STATE.get('performer', '八门官上')}", on_edit_performer),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(
             "K歌歌词", on_toggle_karaoke,
@@ -1514,11 +1850,17 @@ def main():
     STATE["studio_connected"] = open_midi()
     # 说明:Studio One 的 Mackie 不回传静音状态,故不用回读,改为"纯记录 + 归位"。
     # 注意:不要在主线程调 get_qq_volume()——pycaw 的 COM 会和主线程托盘冲突导致崩溃。
-    # bgm_vol 由后台轮询线程(_bgm_poller)首次读取,见下。
+    # bgm_vol 改由 _start_bgm_vol_poller() 后台线程周期回读(走 pycaw 专线程,不碰主线程 COM),
+    # 首次连接也会异步读一次(见 ws_endpoint)。
 
-    start_smtc_reader()   # winrt 子进程(歌名/进度),与主进程 COM 隔离
+    start_smtc_reader()   # winrt 子进程(歌名/进度 + 有方向传输控制),与主进程 COM 隔离
     library.start(STATE, _on_lib_change, _on_lib_import)  # 曲库监听(WeSing缓存→永久曲库,入库弹通知)
     start_player()        # 拉起 K歌播放器子进程(隐藏+暂停)
+    _start_bgm_vol_poller()   # 周期回读 QQ音乐 音量 → 反向同步到手机(PC 上手动改音量也能同步)
+    try:
+        _pycaw_exec.submit(_resolve_qq_sessions)   # 后台预热会话缓存:让首次播放/暂停渐变不必现场枚举
+    except Exception:
+        pass
 
     ip = get_lan_ip()
     url = f"http://{ip}:{config.PORT}"

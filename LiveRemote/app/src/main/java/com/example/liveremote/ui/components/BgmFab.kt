@@ -20,6 +20,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -29,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import android.content.Context
 import androidx.compose.ui.input.pointer.pointerInput
@@ -54,10 +57,12 @@ import kotlin.math.roundToInt
 @Composable
 fun BgmFabOverlay(
     st: AppState,
+    autoFollow: Boolean,
     onPrev: () -> Unit,
     onToggle: () -> Unit,
     onNext: () -> Unit,
     onVol: (Int) -> Unit,
+    onAutoFollow: (Boolean) -> Unit,
 ) {
     androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
         val density = LocalDensity.current
@@ -95,7 +100,7 @@ fun BgmFabOverlay(
             Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { open = false } })
             // 面板跟随悬浮球位置弹出:水平中心对齐球心,竖直优先放球上方(不够则下方),最后夹进屏内
             val panelWpx = with(density) { 260.dp.toPx() }
-            val panelHpx = with(density) { 188.dp.toPx() }   // 估计高度,仅用于夹取与上下方向判断
+            val panelHpx = with(density) { 222.dp.toPx() }   // 估计高度(含联动开关行),仅用于夹取与上下方向判断
             val gap = with(density) { 10.dp.toPx() }
             val margin = with(density) { 8.dp.toPx() }
             var px = pos.x + ballPx / 2f - panelWpx / 2f
@@ -104,13 +109,14 @@ fun BgmFabOverlay(
             px = px.coerceIn(margin, (maxWpx - panelWpx - margin).coerceAtLeast(margin))
             py = py.coerceIn(margin, (maxHpx - panelHpx - margin).coerceAtLeast(margin))
             BgmPanel(
-                st, onPrev, onToggle, onNext, onVol,
+                st, autoFollow, onPrev, onToggle, onNext, onVol, onAutoFollow,
                 onClose = { open = false },
                 modifier = Modifier.offset { IntOffset(px.roundToInt(), py.roundToInt()) },
             )
         } else {
             BgmBall(
                 playing = st.bgmPlaying,
+                autoFollow = autoFollow,
                 modifier = Modifier
                     .offset { IntOffset(pos.x.roundToInt(), pos.y.roundToInt()) }
                     .pointerInput(maxX, maxY) {
@@ -132,7 +138,7 @@ fun BgmFabOverlay(
 private data class Offset0(val x: Float, val y: Float)
 
 @Composable
-private fun BgmBall(playing: Boolean, modifier: Modifier) {
+private fun BgmBall(playing: Boolean, autoFollow: Boolean, modifier: Modifier) {
     val pulse by rememberInfiniteTransition(label = "pulse").animateFloat(
         initialValue = 0f, targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(2000), RepeatMode.Restart), label = "p",
@@ -146,6 +152,16 @@ private fun BgmBall(playing: Boolean, modifier: Modifier) {
         contentAlignment = Alignment.Center,
     ) {
         Text("BGM", color = C.Accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        // 左下角:演唱联动状态点(绿=已开启,灰=关闭),与右下角播放状态点左右对称
+        Box(
+            Modifier
+                .align(Alignment.BottomStart)
+                .padding(6.dp)
+                .size(9.dp)
+                .clip(CircleShape)
+                .background(if (autoFollow) C.Ok else C.TextFaint),
+        )
+        // 右下角:播放状态点(绿=播放中,灰=未播放)
         Box(
             Modifier
                 .align(Alignment.BottomEnd)
@@ -160,10 +176,12 @@ private fun BgmBall(playing: Boolean, modifier: Modifier) {
 @Composable
 private fun BgmPanel(
     st: AppState,
+    autoFollow: Boolean,
     onPrev: () -> Unit,
     onToggle: () -> Unit,
     onNext: () -> Unit,
     onVol: (Int) -> Unit,
+    onAutoFollow: (Boolean) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -202,6 +220,20 @@ private fun BgmPanel(
                 colors = SliderDefaults.colors(thumbColor = C.Accent, activeTrackColor = C.Accent, inactiveTrackColor = C.Stroke2),
             )
             Text("${st.bgmVol}", color = C.Text, fontSize = F.pill, fontWeight = FontWeight.Bold)
+        }
+        // 演唱联动开关:开唱自动暂停 BGM,停唱 2 秒后自动恢复;关掉则互不干涉
+        Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("演唱联动", color = if (autoFollow) C.Text else C.TextDim, fontSize = F.pill, fontWeight = FontWeight.Bold)
+            Text("  开唱暂停 · 停唱续播", color = C.TextFaint, fontSize = F.pill, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
+            Switch(
+                checked = autoFollow, onCheckedChange = onAutoFollow,
+                modifier = Modifier.scale(0.72f),
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = C.OnAccent, checkedTrackColor = C.Accent,
+                    uncheckedThumbColor = C.TextDim, uncheckedTrackColor = C.Stroke2,
+                ),
+            )
         }
     }
 }

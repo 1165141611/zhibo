@@ -6,8 +6,12 @@
 
 ```
 [安卓悬浮窗 App] --WiFi/WebSocket--> [电脑后台服务] --MIDI--> Studio One
-                                                  \--媒体键/pycaw--> QQ音乐
+                                                  \--SMTC(winrt)/pycaw--> QQ音乐
 ```
+
+> QQ音乐 的播放/暂停/切歌走 **SMTC 会话有方向控制**(winrt 子进程按 AUMID 锁定 QQ音乐 自己的
+> 会话),不再模拟无方向的全局媒体键——后者会被路由到抢占系统当前会话的 App(WeSing/浏览器/
+> 直播伴侣),曾是"手机控 BGM 时好时坏、正在播的歌不同步"的根因。详见 `DEV_LOG.md` 二·补。
 
 ---
 
@@ -65,7 +69,9 @@ App WebSocket 地址:  ws://192.168.x.x:8765/ws
 ```jsonc
 // App → 电脑
 {"cmd":"scene","id":5}              // 切场景
-{"cmd":"bgm","action":"next"}       // next / prev / playpause
+{"cmd":"bgm","action":"next"}       // next / prev / playpause / play / pause
+                                    // play、pause 有方向且幂等(已在目标状态则不动),供手机
+                                    // "演唱↔BGM 联动"用——playpause 无方向,状态一过期就会打反
 {"cmd":"bgm_vol","value":40}        // 音量 0-100
 
 // 电脑 → App
@@ -115,12 +121,36 @@ pc-service 把播放器 IPC 接进 WebSocket,并加曲库列表/点歌队列(供
   `k_title`/`k_artist`、`player_visible`、`lib_count`。**唱完切下一首开头暂停(不自动连播)**:`server.py` 的
   `_player_reader` 解析播放器 `STATE`,检测到当前歌播放结束(`pos≥dur-800` 且由播转停)→ `k_advance_paused()`
   只 `load` 队列下一首(归位到 0、暂停,等主播手动开唱);队列空则清空当前曲(`now=null`)。歌曲间歇 BGM
-  由手机端"演唱↔BGM 联动"自动恢复。手动 `kqueue_next` 仍立即开唱。
+  由手机端"演唱↔BGM 联动"自动恢复(缓冲 2s,可在手机 BGM 悬浮面板关闭联动)。手动 `kqueue_next` 仍立即开唱。
+  **空队列点第一首也不自动开唱(2026-07-15)**:`k_enqueue` 在 `_now_mid is None` 时只 `load`(载入开头暂停),
+  不再 `k_play_next()`(load+play)——与"唱完切下首暂停"一致,首歌载入待唱期间 BGM 顶着,主播按播放键才开唱。
+  配合播放器"未演唱态不显歌词/音准线"(见 karaoke-player),观众在开唱前只看到纯绿,不会提前露出待唱那首的词/音高。
+- **BGM 播放/暂停可靠性(2026-07-14)**:①`_play_fade_in_impl` 修"恢复播放炸响"——QQ音乐(MediaSDK_Server)
+  **暂停即销毁音频会话,外部无 API 阻止**;恢复时新会话默认 100%,且"出现在枚举器里"和"开始出声"几乎同时,
+  暂停后枚举器里还**残留 Inactive 老会话**(实测),"轮询见到会话就压 0"会咬住死会话、永远慢半拍。终版双保险:
+  **端点静音保险丝**——按播放**之前**先把(见过 QQ 会话的)设备端点静音(端点是设备级、可提前操作;新会话纵然
+  100% 也放不出一个采样),等新会话被压 0 后恢复端点原状(`finally` 保证);**紧凑轮询**——80ms 一拍只扫
+  设备级缓存 `_qq_dev_mgrs`(毫秒级,全量枚举一轮 ~0.3s)、只认 `GetState()==1`(Active)的新会话。渐强中每
+  5 步补扫迟到会话,收尾兜底设一次目标值。**伴奏保护门控**:伴奏与 BGM 共用 PLAYBACK 1/2,保险丝**只在
+  伴奏静默(`k_playing=False`)时上**(联动恢复时演唱必已停,静音无声通道无感);伴奏出声时(演唱中手动恢复
+  BGM)退化为纯快速轮询(≤80ms 接管,有伴奏+人声垫底);等待期间伴奏若开播,**立即撤保险丝**。
+  **进程归属校验(重大坑)**:`MediaSDK_Server.exe` 是腾讯**共用**媒体进程——**直播伴侣**的同名子进程在
+  `PLAYBACK 3/4`/`VIRTUAL REC 3/4`(推流主麦链路!)上挂着音频会话,按进程名裸匹配会把 BGM 音量调到
+  推流主麦上(暂停 BGM=直播间静音,实锤复现;"VIRTUAL REC 3/4 归零"悬案同源)。`_is_qq_pid` 要求
+  `QQMUSIC_OWNER_CHECK` 里的共用进程**父链含 QQMusic.exe** 才算(pid 判定缓存 TTL 60s),并优先只在
+  `QQMUSIC_DEVICE_HINT`(PLAYBACK 1/2)设备上找会话。②渐变时 `bgm_playing` **先乐观翻转并广播**
+  (按钮/联动立刻看到正确方向),并加 **SMTC 覆盖抑制窗**(`_bgm_smtc_mute_until`,渐变后几秒内丢弃 winrt
+  快照里的 `bgm_playing`)——否则子进程推来按键前的旧快照会把状态翻回去,后续 `playpause` 方向反打,表现为
+  "手动暂停 BGM 后自动化失灵"。③新增有方向的 `{"cmd":"bgm","action":"play"/"pause"}`(幂等),联动全部改用。
 - **跨重启持久缓存**:声卡场景 + 通道静音记录 + 演唱音量 + **Studio One 显隐** + **音准线显隐** + **歌词字体**
-  + **顶端歌单(内容/显隐/位置)**存 `pc-service/state_cache.json`(gitignore),变更即原子写盘,服务重启时恢复
-  (静音记录只恢复不发 MIDI;`k_vol`/`pitch_visible`/`k_font`/`setlist*` 在拉起播放器后下发一次
-  (`vol`/`pitch`/`font`/`setlist`/`setlist_show`/`setlist_y`);`studio_visible` 恢复时若上次是隐藏则重新
-  `hide()`,可见则不动免抢焦点)。App 连接首帧以后端 `k_vol` 为准反向同步手机媒体音量。
+  + **顶端歌单(内容/显隐/位置)** + **K歌播放器窗口桌面位置** + **演唱者(主播名)**存 `pc-service/state_cache.json`
+  (gitignore),变更即原子写盘,服务重启时恢复
+  (静音记录只恢复不发 MIDI;`k_vol`/`pitch_visible`/`k_font`/`setlist*`/`player_x,player_y`/`performer` 在拉起
+  播放器后下发一次(`vol`/`pitch`/`font`/`setlist`/`setlist_show`/`setlist_y`/`pos x y`/`performer`);`studio_visible`
+  恢复时若上次是隐藏则重新 `hide()`,可见则不动免抢焦点)。播放器窗口位置随其 `STATE` 的 `win_x/win_y` 回读
+  (纯 PC 侧信息,不推手机)。App 连接首帧以后端 `k_vol` 为准反向同步手机媒体音量。
+- **演唱者(主播名)**:`STATE["performer"]`(默认"八门官上"),托盘"演唱者:<名>"菜单点击弹框可改
+  (`_open_performer_dialog`),保存即存盘 + `_player_send("performer <名>")` 下发。播放器开头标题卡"演唱:<名>"用。
 - **顶端滚动歌单**:曲库管理页勾选框把歌加入 `STATE["setlist"]`(mid 列表),`set_setlist_member` 更新+存盘+
   `_push_setlist`(mid→歌名 JSON)推给播放器顶端滚动字幕;播放器 `O`(显隐)/`Ctrl+↑↓`(位置)经 STATE 回读
   写盘。仅曲库页勾选 + 播放器键盘,无手机 UI。
