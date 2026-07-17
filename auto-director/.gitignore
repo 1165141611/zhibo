@@ -1,0 +1,5 @@
+# 机位占位底图:由 obs_setup.py 生成,可再生,不入库
+assets/
+__pycache__/
+# YuNet 模型:从 OpenCV zoo 下载,可再生,不入库
+models/

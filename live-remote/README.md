@@ -99,9 +99,13 @@ pc-service 现在也是**电脑端 K歌中枢**(总体方案见根 [`../KARAOKE_
 pc-service 把播放器 IPC 接进 WebSocket,并加曲库列表/点歌队列(供手机 App)。
 
 - **`GET /library`** → `{count, songs:[{mid,title,artist}]}`(曲库列表,供点歌页;曲库变化时 WS 会推状态,手机重拉)。
-- **`GET /song/{mid}/karaoke`** → `{mid, lines:[{start,end,chars:[{text,start,dur}]}], notes:[{start,dur,pitch}]}`
+- **`GET /song/{mid}/karaoke`** → `{mid, lines:[{start,end,chars:[{text,start,dur}]}], notes:[{start,dur,pitch}], chorus:[[s,e]...]}`
   (某首歌的**逐字歌词**(QRC 解析,绝对 ms)+ **音高线**(`.note`,pitch 归一化 0..1),供**演唱页卡拉OK渲染**;
   手机在正唱歌切换时拉一次。解析见 `karaoke_data.py`,复用 `tripledes`(不引 numpy),按 mid 缓存。404=无此歌 QRC)。
+  **`chorus`** = 副歌区间 `[[起ms,止ms],...]`,读自 `<曲库>/<mid>/meta.json` 的 `chorus` 键(**手动标注**,无则空),
+  供**自动切镜状态机**(见 `../auto-director/`)——状态机唯一无法从逐字轴自动推导的数据。
+- **CORS**:`server.py` 已加 `CORSMiddleware(allow_origins=["*"])`,放开只读接口跨源,供独立打开的
+  自动切镜模拟器(`../auto-director/director-sim.html`)跨源 fetch。LAN 内无鉴权工具,只读放开无碍;WS 握手不走 CORS。
 - **WebSocket 命令**(App→电脑,`server.py` 转成播放器 IPC / 队列操作):
   ```jsonc
   {"cmd":"kqueue_add","mid":"..."}   // 点歌入队(空闲则立即开唱)

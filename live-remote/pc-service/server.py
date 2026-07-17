@@ -63,6 +63,7 @@ import karaoke_data
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 import config
 
@@ -677,6 +678,10 @@ def _start_bgm_vol_poller():
 #  4) WebSocket 服务
 # ══════════════════════════════════════════════════════════
 app = FastAPI()
+# 允许跨源读接口(自动切镜模拟器 auto-director/ 独立打开时,跨源 fetch /song/{mid}/karaoke;
+# 只读接口,本就 LAN 内无鉴权工具,放开无碍。WS 握手不走 CORS,本就跨源可用)。
+app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                   allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 _clients = set()
 _loop = None            # uvicorn 的事件循环(供子进程读取线程跨线程广播)
 _smtc_proc = None       # winrt 子进程
@@ -1160,6 +1165,30 @@ def _player_reader(proc):
         pass
 
 
+def _resolve_player_device():
+    """按名字实时解析播放器输出设备索引(防设备枚举漂移)。找 WASAPI 下名字含 PLAYER_DEVICE_NAME
+    且有输出通道的设备;找不到回退 config.PLAYER_DEVICE。教训见 config.py PLAYER_DEVICE_NAME。"""
+    try:
+        import sounddevice as sd
+        want = config.PLAYER_DEVICE_NAME
+        cands = []
+        for i, d in enumerate(sd.query_devices()):
+            if d["max_output_channels"] > 0 and want in d["name"]:
+                ha = sd.query_hostapis(d["hostapi"])["name"]
+                cands.append((i, ha, d["name"]))
+        for i, ha, nm in cands:                     # 优先 WASAPI(伴奏走这条)
+            if config.PLAYER_DEVICE_HOSTAPI in ha:
+                print(f"[PLAYER] 输出设备按名解析 → [{i}] {nm} ({ha})")
+                return i
+        if cands:
+            print(f"[PLAYER] 未找到 {config.PLAYER_DEVICE_HOSTAPI},用 [{cands[0][0]}] {cands[0][2]}")
+            return cands[0][0]
+    except Exception as e:
+        print(f"[PLAYER] 设备名解析失败,回退索引 {config.PLAYER_DEVICE}: {e}")
+    print(f"[PLAYER] 未匹配到 '{config.PLAYER_DEVICE_NAME}',回退索引 {config.PLAYER_DEVICE}")
+    return config.PLAYER_DEVICE
+
+
 def start_player():
     """拉起 K歌播放器子进程:隐藏、暂停、关 SMTC、指定声卡。stdin 收指令 / stdout 报可见性。
     不自动重启(面向用户,可能主动关)。"""
@@ -1169,9 +1198,10 @@ def start_player():
         # 会让下面 encoding="utf-8" 的读取在第一行就 UnicodeDecodeError 崩掉读取线程 → 管道写满 → 播放器
         # GUI 卡死无响应)。errors="replace":父进程侧再加一层兜底,任何杂字节也绝不崩读取循环。
         _env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        dev_idx = _resolve_player_device()
         _player_proc = subprocess.Popen(
             [config.PLAYER_PYTHON, config.PLAYER_PATH,
-             "--device", str(config.PLAYER_DEVICE),
+             "--device", str(dev_idx),
              "--hidden", "--paused", "--no-smtc"],
             creationflags=0x08000000,        # CREATE_NO_WINDOW
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

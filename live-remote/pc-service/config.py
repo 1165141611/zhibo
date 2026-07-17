@@ -68,7 +68,12 @@ BASE_DIR = _os.path.dirname(_os.path.abspath(__file__))
 KARAOKE_DIR   = _os.path.abspath(_os.path.join(BASE_DIR, "..", "..", "karaoke-player"))
 PLAYER_PATH   = _os.path.join(KARAOKE_DIR, "player.py")
 PLAYER_PYTHON = _sys.executable    # 与本服务同一解释器(已装 PySide6/sounddevice/numpy/audiotsm)
-PLAYER_DEVICE = 27                 # sounddevice 输出设备索引(已验证=ROUTIST PLAYBACK 1/2)
+PLAYER_DEVICE = 27                 # 回退索引(名字解析失败时用;索引会随设备增减漂移,不可靠)
+# 优先按名字实时解析输出设备(防漂移):找 WASAPI 下名字含此串、有输出通道的设备。
+# 教训:接相机/ToDesk 虚拟音频等会新增音频端点,挤动 WASAPI 枚举顺序,写死索引 27 会指到别的设备
+# (曾指到 ToDesk Virtual Audio,音乐灌进去听不到)。见 server.py _resolve_player_device。
+PLAYER_DEVICE_NAME    = "PLAYBACK 1/2"   # ROUTIST R2 的伴奏/BGM 路由
+PLAYER_DEVICE_HOSTAPI = "WASAPI"
 PLAYER_TITLE  = "KaraokePlayer"    # 播放器窗口标题(player.py 里写死),karaoke_win 靠它找 hwnd
 
 # ── 自动曲库导入器 ────────────────────────────────────

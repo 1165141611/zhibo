@@ -5,10 +5,11 @@
 
 ## 一、项目速览
 
-三个子项目,详见 [README.md](README.md)。一句话:
+四个子项目,详见 [README.md](README.md)。一句话:
 - `live-remote/` = PC 遥控服务(Python/FastAPI),已完成。
 - `LiveRemote/` = 安卓遥控 App(Kotlin),开发中。
 - `karaoke-player/` = 自制K歌播放器(Python/PySide6),单曲 Demo 已通。
+- `auto-director/` = 多机位数据驱动自动切镜/运镜(状态机+护栏),原型·模拟器阶段,拟接 OBS。
 
 **整合大方案与路线图见 [KARAOKE_SYSTEM.md](KARAOKE_SYSTEM.md)** —— K歌播放器 + pc-service 中枢 + 手机全屏
 点歌台的目标架构、已定决策、分阶段路线。**做 K歌 相关大功能前先读它**,别被单次微调的上下文带偏。
@@ -35,7 +36,9 @@
   PATH 里的 `python` 是 Microsoft Store 占位版,**不能用**。
 - **adb**:`D:\scrcpy-win64-v3.3.1\adb.exe`(随 scrcpy 附带)。安卓手机常连在 `192.168.1.6:5555`。
 - **声卡**:ROUTIST R2(虚拟路由多通道)+ Studio One。
-  - 伴奏/BGM 走 `PLAYBACK 1/2`(WeSing/karaoke-player 用,WASAPI 设备索引约 27)。
+  - 伴奏/BGM 走 `PLAYBACK 1/2`(WeSing/karaoke-player 用)。**设备索引不稳**(接相机/ToDesk 虚拟音频会
+    挤动 WASAPI 枚举顺序,曾把写死的索引 27 顶成 ToDesk Virtual Audio 致播放器音乐听不到);pc-service
+    已改**按名解析** `_resolve_player_device()`(WASAPI 下名字含 `PLAYBACK 1/2`),`config.PLAYER_DEVICE=27` 仅回退。
   - **别往 `PLAYBACK 3/4` 灌音频**(麦克风监听通道,会回授炸麦)。
   - 推流采集链路:音乐→`PLAYBACK 1/2`→Studio One「他人听」总线→ASIO `PLAYBACK 3/4`→
     `VIRTUAL REC 3/4`→直播伴侣主麦克风。**直播间没声先查 Windows 里 `VIRTUAL REC 3/4`

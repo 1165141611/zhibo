@@ -1,0 +1,6 @@
+# 自动切镜测试驱动(director.py)专用依赖,与绿幕播放器/pc-service 无关。
+# 删除测试即可连同卸载,不影响其它子项目。
+websocket-client>=1.6     # 订阅 pc-service 的 ws://:8765/ws(被动只读)
+obsws-python>=1.6         # 驱动 OBS(obs-websocket v5);--dry-run 模式不需要
+opencv-python-headless    # YuNet 头部实时跟踪(特写锁人);模型 models/yunet.onnx
+numpy

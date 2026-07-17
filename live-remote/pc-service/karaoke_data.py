@@ -5,6 +5,7 @@
 import os
 import re
 import sys
+import json
 import zlib
 
 import config
@@ -85,8 +86,21 @@ def _load_notes(note_path):
     return notes
 
 
+def _load_chorus(song_dir):
+    """副歌区间 [[start_ms,end_ms],...] —— 来自 meta.json 的 `chorus` 键(手动标注,状态机
+    唯一无法自动推导的数据;自动切镜用)。无标注则空列表。"""
+    try:
+        with open(os.path.join(song_dir, "meta.json"), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        ch = meta.get("chorus") or []
+        return [[int(a), int(b)] for a, b in ch]
+    except Exception:
+        return []
+
+
 def song_karaoke(mid):
-    """返回 {mid, lines, notes:[{start,dur,pitch0..1}]} 或 None(找不到 QRC)。"""
+    """返回 {mid, lines, notes:[{start,dur,pitch0..1}], chorus:[[s,e]...]} 或 None(找不到 QRC)。
+    lines/notes 供手机演唱页;chorus 供自动切镜状态机(见 auto-director/)。"""
     if not mid:
         return None
     if mid in _CACHE:
@@ -107,6 +121,6 @@ def song_karaoke(mid):
         span = (his - los) or 1
         notes = [{"start": s, "dur": du, "pitch": round((mi - los) / span, 3)}
                  for (s, du, mi) in raw_notes]
-    payload = {"mid": mid, "lines": lines, "notes": notes}
+    payload = {"mid": mid, "lines": lines, "notes": notes, "chorus": _load_chorus(d)}
     _CACHE[mid] = payload
     return payload

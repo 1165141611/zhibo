@@ -332,19 +332,31 @@ class KaraokeWindow(QtWidgets.QWidget):
 
     def _draw_pitch_cursor(self, p, cx, top, bh, bar_h, now):
         """播放头处的白色圆形"音高游标":直径稍大于音准线粗细,带柔和光晕(径向渐变)。
-        其 y 高度=当前时刻所在音符的音高;无音符(间奏/尾奏)→ 平滑落到底部等待。
-        平滑:每帧朝目标插值,像弹跳小球上下滑动。"""
-        target = top + bh                            # 默认底部(无音符时落底)
-        for n in self.song.notes:
+        - **有音符**(唱着):加**轻阻尼**滑向该音符音高(跟手但不生硬,不再瞬吸);
+        - **句末/间奏无音符**:加**更慢阻尼**缓缓回落到底部,不直接砸底;
+        - **演唱结束**(过了最后一个音符=没音准线了):**隐藏游标**(不再画)。"""
+        notes = self.song.notes
+        last_end = notes[-1].end if notes else 0
+        if now > last_end:                           # 全部音符已过=演唱结束、没音准线 → 隐藏
+            self._dot_y = None                       # 复位:下次(如 seek 回去)有音符时重新吸附
+            return
+        cur = None
+        for n in notes:
             if n.start <= now < n.end:
-                target = self._midi_to_y(n.midi, top, bh)
+                cur = n
                 break
             if n.start > now:                        # 音符按 start 排序,过了当前时刻即停
                 break
+        if cur is not None:                          # 有音符:轻阻尼滑向音高
+            target = self._midi_to_y(cur.midi, top, bh)
+            damp = self.PITCH_DOT_DAMP_NOTE
+        else:                                        # 句末/间奏无音符:更慢阻尼回落到底部
+            target = top + bh
+            damp = self.PITCH_DOT_DAMP_FALL
         if self._dot_y is None:
-            self._dot_y = target
+            self._dot_y = target                     # 首帧直接就位,不从别处滑入
         else:
-            self._dot_y += (target - self._dot_y) * 0.25   # 帧驱动平滑滑动
+            self._dot_y += (target - self._dot_y) * damp
         dy = self._dot_y
         thick = bar_h + self.PITCH_OW                # 音准线总粗
         r_dot = thick * 0.65                         # 直径≈1.3×总粗,稍大于音准线粗细
@@ -569,6 +581,10 @@ class KaraokeWindow(QtWidgets.QWidget):
     # 音准线:粗细/描边与歌词笔画看齐(黑描边,不再淡化);总粗≈bar_h+ow
     PITCH_BAR_H = 6.0        # 音准块填充高
     PITCH_OW = 2            # 音准块黑描边宽
+    # 音高游标阻尼(每帧朝目标走的比例,越小越慢/越"阻尼"):有音符时响应式滑向音高(不生硬),
+    # 句末无音符时更慢地阻尼回落到底部
+    PITCH_DOT_DAMP_NOTE = 0.3   # 有音符:跟随旋律滑到音高(比瞬吸柔和,又够跟手)
+    PITCH_DOT_DAMP_FALL = 0.08  # 句末/间奏:缓缓回落到底部
     # 开头标题卡(歌名/原唱/演唱):前几秒居中显示后渐隐,再出歌词/音准线
     TITLE_MAX = 5500        # 最长显示(ms);实际取 min(此值, 首句起点-600)
     TITLE_FADE_IN = 400
