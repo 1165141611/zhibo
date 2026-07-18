@@ -63,6 +63,8 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     private var seekLockUntil = 0L
     private var playLockUntil = 0L
     private var volLockUntil = 0L
+    private var directorLockUntil = 0L
+    private var camZoomLockUntil = 0L
     private val OPT_LOCK_MS = 1200L
     private fun now() = System.currentTimeMillis()
 
@@ -146,6 +148,8 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             pitchVisible = j.optBoolean("pitch_visible", old.pitchVisible),
             setlistVisible = j.optBoolean("setlist_visible", old.setlistVisible),
             libCount = j.optInt("lib_count", old.libCount),
+            directorOn = if (now() < directorLockUntil) old.directorOn else j.optBoolean("director_on", old.directorOn),
+            camZoom = if (now() < camZoomLockUntil) old.camZoom else j.optInt("cam_zoom", old.camZoom),
         )
         _state.value = ns
         interlockBgm(ns)
@@ -286,6 +290,20 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(scene = 0)   // 乐观清零:所有场景按钮立即回未选中
         client.send("cmd" to "reset_scene")
         toast("已归位")
+    }
+
+    // ───────────────────────── 自动切镜运镜 ─────────────────────────
+    fun setDirector(on: Boolean) {
+        directorLockUntil = now() + OPT_LOCK_MS
+        _state.value = _state.value.copy(directorOn = on)   // 乐观:开关立即切换
+        client.send("cmd" to "director", "on" to on)
+        toast(if (on) "自动切镜运镜 已开启" else "自动切镜运镜 已关闭(回主机)")
+    }
+    fun setCamZoom(v: Int) {
+        val nv = v.coerceIn(100, 250)
+        camZoomLockUntil = now() + OPT_LOCK_MS
+        _state.value = _state.value.copy(camZoom = nv)      // 乐观:滑块立即跟手
+        client.send("cmd" to "cam_zoom", "value" to nv)
     }
 
     // ───────────────────────── QQ音乐 BGM ─────────────────────────

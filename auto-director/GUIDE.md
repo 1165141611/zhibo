@@ -11,11 +11,15 @@
 用**多机位 + 数据驱动的自动切镜/运镜**替代单机位数字放大跟随,做接近赵雷 Live 的多角度 KTV 感。
 真实三机位现状:
 
-| 机位 | 设备 | 接入 | 角色 |
+| 机位 | 设备(1号/2号/3号手机,全走 iVCam) | OBS 里的设备名 | 角色 |
 |---|---|---|---|
-| **cam1 主** | iPhone(Camo) | USB/WiFi 虚拟摄像头 | 正前偏左·中景,大本营;可到贴脸超特写 |
-| **cam2 侧辅** | 安卓(iVCam) | USB/WiFi 虚拟摄像头 | 侧面·近景/情绪(低角度仰拍) |
-| **cam3 侧高** | 大疆 Osmo Action 6 | USB UVC 网络摄像头 | 高远·广角"呼吸",可前推/后撤 |
+| **cam1 主** | 1号手机(**先连**) | `e2eSoft iVCam #1` | 正前偏左·中景,大本营;可到贴脸超特写 |
+| **cam2 侧辅** | 2号手机(**后连**) | `e2eSoft iVCam #2` | 侧面·近景/情绪(低角度仰拍) |
+| **cam3 侧高** | 3号手机(**最后连**) | `e2eSoft iVCam #3` | 高远·广角"呼吸",可前推/后撤 |
+
+> ⚠️ **iVCam 后缀 `#N` 按连接顺序分配,不是设备固定属性**。接 3 台时依次是 `#1`/`#2`/`#3`(接 1~2 台时首台可能无后缀)。
+> 所以每次开机务必**固定顺序连:1号→2号→3号**,否则 `#N` 会错位、机位映射乱掉。跟声卡索引漂移是同类坑(见 §8)。
+> 实测 iVCam 分辨率 1080p~1440p(比 UVC 的 720p 清晰)。
 
 ### 数据流(合规版)
 
@@ -42,6 +46,7 @@ karaoke-player(绿幕字幕/精确时钟) --STATE 每500ms--> pc-service(中枢)
 - `director.py` —— 核心:状态机 + 镜头编排 + 运镜 + YuNet 头部跟踪,驱动 OBS。配置全在文件顶部。
 - `wire_camera.py` —— 把某机位场景的源换成真实摄像头(保持源名 `content_<cam>`)。
 - `obs_setup.py` —— 一键搭建占位测试环境(生成机位底图 + 建 cam1/2/3 场景)。
+- `ktv_overlay.py` —— **KTV 歌词叠层接入**:给 `KTV悬浮`(karaoke-player 绿幕窗口捕获)加绿幕色键 + 同步到三场景并置顶(见 §3.5)。
 - `director-sim.html` —— 纯网页导播台模拟器(假机位 SVG,不接 OBS,验证逻辑用)。
 - `models/yunet.onnx` —— YuNet 人脸检测模型(OpenCV 官方,已 gitignore,可再下)。
 - `requirements.txt` —— `websocket-client + obsws-python + opencv-python-headless + numpy`。
@@ -88,6 +93,21 @@ EMA(`TRACK_SMOOTH`)平滑后写 `CAM_FACE_LIVE`(两眼中点)。特写/三分**�
 - **防黑边(位置钳制)**:放大/平移后画面位置夹到"仍盖满画布"的区间,任何运镜都不露黑边;
   1:3 前推要把脸推到三分且不露边,需 `z≥(1-ax)/(1-cx)≈1.5`(故 thirds z=1.5)。
 
+### 3.5 KTV 歌词叠层(`KTV悬浮`)
+每个场景里除了摄像头源 `content_<cam>`,还有一层 **`KTV悬浮`** = **karaoke-player 绿幕歌词窗口的窗口捕获**
+(顶部滚动歌单 + 底部逐字歌词/音准)。约定:
+- **一个源、三场景共用**:`KTV悬浮` 加进 cam1/cam2/cam3 三个场景(同一输入),**置于摄像头之上**(顶层),
+  这样不管 director 切到哪台,歌词始终浮在画面上。
+- **绿幕色键**:滤镜「绿幕抠图」(`chroma_key_filter_v2`, green)挂在**源**上 → 三场景全生效,抠掉纯绿 `#00FF00` 只留字。
+- **director 不碰它**:director 只变换 `content_<cam>`;`KTV悬浮` 固定不动,所以摄像头推拉/切换时歌词稳定不跟着缩放(正确)。
+- **前置**:karaoke-player 窗口须**显示态**(pc-service `kshow`)且**绿底**,窗口捕获才有内容;隐藏/透明底则捕获不到。
+- **图层顺序坑**:obs-websocket 的 `sceneItemIndex` **0=底层、越大越上层**;叠层必须比摄像头 index 大才盖在上面。
+- **一键接入/恢复**:`python ktv_overlay.py`(重建场景后跑一次即可)。
+- **布局(KTV 款)**:`ktv_overlay.py` 裁成"歌单在顶、歌词在底、状态栏切掉、上下等间隙、水平居中":
+  源 1260×1680(720×960 @175%DPI),元素位置——歌单 y606~658 / 歌词+音准 y1382~1565 / 底部状态栏 y1603~1668。
+  以 `SETLIST_TOP=606`(上锚)、`LYRICS_BOTTOM=1565`(下锚)裁剪(状态栏 1603+ 切掉),缩放后**上下各留 `GAP=45px`**
+  (歌单顶间隙 == 歌词底间隙,对称)、水平居中。换 DPI/窗口尺寸要重量这几个坐标;微调改 `SETLIST_TOP/LYRICS_BOTTOM/GAP` 重跑。
+
 ---
 
 ## 4. 参考视频分析(赵雷《Over》Live)——编排的依据
@@ -112,14 +132,16 @@ EMA(`TRACK_SMOOTH`)平滑后写 `CAM_FACE_LIVE`(两眼中点)。特写/三分**�
 **只要保持 OBS 里三个场景各有一个 `content_<cam>` 源,director 代码不用改。** 按需做以下:
 
 ### A. 换了设备 / 设备名变了 → 用 wire_camera.py 重接
+**先固定顺序连手机**:iPhone 先连 iVCam(→`e2eSoft iVCam`),安卓后连(→`e2eSoft iVCam #2`)。然后:
 ```bash
 cd auto-director
-python wire_camera.py                 # 先列出当前所有摄像头设备名
-python wire_camera.py cam1 Camo       # iPhone(Camo)接 cam1
-python wire_camera.py cam2 iVCam      # 安卓(iVCam)接 cam2
-python wire_camera.py cam3 OsmoAction # 大疆接 cam3
+python wire_camera.py            # 先列出当前所有摄像头设备名(核对 #1/#2/#3 对没对)
+python wire_camera.py cam1 "#1"  # 1号手机 → cam1
+python wire_camera.py cam2 "#2"  # 2号手机 → cam2
+python wire_camera.py cam3 "#3"  # 3号手机 → cam3(若用大疆则 python wire_camera.py cam3 OsmoAction)
 ```
-它自动删旧源、绑设备、**等比铺满 4:3 画布**(16:9 不变形),并切到该场景。参数 2 = 设备名的一段(模糊匹配)。
+**存在就改设备、不存在才新建**(避开 obs-websocket 删除异步的竞态),自动**等比铺满 4:3 画布**(16:9 不变形)、切到该场景。
+参数 2 = 设备名片段:精确名优先,子串多命中取最短名;用 `"#1"`/`"#2"`/`"#3"` 精确指定第 N 台。
 
 ### B. 只是挪动了机位/改了构图 → 头部跟踪会自动适应
 `CAM_FACE_LIVE` 由 YuNet 每 0.5s 实时更新,**摆好机位、人站到唱歌位,特写会自动跟着新头位**,一般不用手动改。
@@ -182,6 +204,13 @@ cd auto-director && python director.py
 ```
 调试期保持某首歌循环:`scratchpad/keep_playing.py` 思路(快到结尾就 seek 回主歌、暂停就续播)。
 
+### 由 App/pc-service 开关(2026-07-18)
+现在 **director 由 pc-service 托管**,不必手动跑:安卓遥控页「自动切镜运镜」开关 → WS `director {on}` →
+开=pc-service `Popen(python director.py)`;关=终止进程 + **立即切主机 cam1** + 应用主镜放大档位。
+`cam_zoom {value:100~250}`(仅关闭时)= pc-service 直接 obs-websocket 居中数字放大 cam1(cover 不变形、防黑边)。
+pc-service 侧见 `_start_director/_stop_director/set_director/_obs_cut_main/_obs_zoom_main`(server.py)、
+`config.DIRECTOR_PATH/OBS_*/MAIN_CAM_*`。开着自动切镜时 App 的放大滑块禁用(director 独占 OBS,两者互斥不打架)。
+
 ---
 
 ## 8. 调试踩坑记录(值得记住的点)
@@ -198,10 +227,21 @@ cd auto-director && python director.py
 6. **WS 线程别做阻塞网络请求**:换歌拉逐字轴(HTTP 最长 5s)必须放**独立线程**,否则卡住主循环、时钟漂。
 7. **obs-websocket 30Hz 变换没问题**(压测 150 次/5s 无卡),运镜可放心 30Hz 插值,不需 Move 插件。
 8. **抖音不许 OBS 推流**:改虚拟摄像机 → 直播伴侣官方推。
-9. **DroidCam 需谷歌服务**(安卓),换成 **iVCam**(`e2eSoft iVCam`)。
+9. **DroidCam 需谷歌服务**(安卓),换成 **iVCam**(`e2eSoft iVCam`)。**iVCam 多机同名、后缀 `#2`/`#3` 按连接
+   顺序分配**(不是设备固定属性)——务必固定顺序连(iPhone→安卓→第三台),否则映射错位。`wire_camera.py` 已改
+   **精确名优先**、子串多命中取最短名,用 `"#2"`/`"#3"` 精确指定第 N 台。跟"声卡索引漂移"同类:**别依赖不稳定的枚举名/序**。
 10. **头部跟踪 > OBS 插件**:插件与我们的变换抢控制;自研 YuNet 只给坐标,运镜全保留。
 11. **cv2 5.0 无 CascadeClassifier**,但有 **FaceDetectorYN(YuNet)**,用它。
 12. **占位图调运镜手感无意义**:必须接真机位才能判断,数字景别叠加物理角度差才是真正的多镜头。
+13. **obs-websocket 删除是异步的**:`RemoveInput` 后立刻 `CreateInput` 同名会 601「已存在」,随后异步删除才生效→源丢失。
+    `wire_camera.py` 已改**"存在就 SetInputSettings 改设备、不存在才 CreateInput"**,彻底避开删/建竞态。
+14. **残留边界框(bounds)覆盖 scale**:某些源带 `boundsType=OBS_BOUNDS_SCALE_INNER`(OBS 自动适配留下的),
+    它会**无视你设的 scaleX/Y**、按边界框内切摆放 → 16:9 进 4:3 出现黑边。所有设 framing 变换处必须显式带
+    `boundsType=OBS_BOUNDS_NONE`(wire_camera 的 cover_framing、director 的 set_framing、pc-service 的 _obs_zoom_main 均已加)。
+15. **pc-service 托管 director 必须设 UTF-8 环境**:`_start_director` 的 `Popen` 若不传 `PYTHONIOENCODING=utf-8`,
+    Windows 默认 GBK,director `print("♪/→/中文")` 会 `UnicodeEncodeError` 崩主循环——**恰在第一次 `[切]` 打印,
+    表现为"开自动切镜只切一下就不动"**(切镜动作在 print 前已执行,进程随即死;stderr 走 DEVNULL 看不到崩因)。
+    与 `start_player` 同一个坑。托管任何有中文/符号输出的子进程都要设 UTF-8。
 
 ---
 

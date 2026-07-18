@@ -38,8 +38,9 @@
   - 删除测试：删 `auto-director/` 整个目录 + 在 OBS 里删掉 cam1/2/3 场景，回滚 pc-service 的 CORS/chorus
     两处只读加法即可，播放器无痕。
 - `wire_camera.py` —— **把某机位场景换成真实摄像头**(UVC/虚拟摄像头),保持源名 `content_<cam>` 故 director 无需改。
-  `python wire_camera.py`（列设备）/ `python wire_camera.py cam2 iVCam`（安卓iVCam接cam2）/ `cam1 Camo`（iPhone）/ `cam3 OsmoAction`（大疆）。
-  自动删占位源、绑设备、**等比铺满 4:3 画布**（16:9 相机居中裁切不变形）。
+  `python wire_camera.py`（列设备）/ `cam1 "#1"` / `cam2 "#2"` / `cam3 "#3"`（三台手机全走 iVCam,按连接顺序编号）。
+  **存在就改设备、不存在才新建**(避开删除异步竞态)、**等比铺满 4:3 画布**（16:9 居中裁切不变形）、精确名优先。
+  ⚠️ iVCam `#N` 后缀按连接顺序分配 → 每次**固定顺序连手机(1→2→3号)**,否则映射错位。
 - `obs_setup.py` —— **OBS 测试环境一键搭建**：生成三张机位底图（`assets/cam{1,2,3}.png`，网格+机位标签+FACE
   标记，便于看运镜）+ 在 OBS 里建 cam1/2/3 三场景、各放一个 `content_<cam>` 图片源。`python obs_setup.py` 跑一次即可。
   （`assets/` 可再生、已 gitignore。）
@@ -112,6 +113,7 @@
 - [ ] `chorusRanges` 标注 UI：在曲库管理页给每首歌标副歌区间，写入 `meta.json` 的 `chorus` 键
   （数据契约已通，缺录入界面；先可手动编辑 meta.json 验证）。
 - [ ] 换真实摄像头：把每个场景的 `content_<cam>` 图片源换成真机位「摄像头」源（Camo/DroidCam；director 无需改）。
-- [ ] KTV 字幕接入 OBS：karaoke-player 绿幕窗口捕获 + 色键，叠在机位层上（注意播放器是竖屏 3:4、直播是 4:3 横屏，需重排布局）。
+- [x] KTV 字幕接入 OBS：`KTV悬浮`（karaoke-player 绿幕窗口捕获）+ 绿幕色键 + 同步到三场景并置顶，`ktv_overlay.py` 一键接入（见 GUIDE §3.5）。
+  剩：竖屏 3:4 播放器窗在 4:3 横屏画布的布局微调（顶歌单/底歌词位置,OBS 里手动调 KTV悬浮 项）。
 - [ ] 抖音合规：OBS **不推流**，改「启动虚拟摄像机」→ 直播伴侣选 OBS Virtual Camera 官方推流。
 - [ ] 多机延迟对齐；三机白平衡/曝光锁死。

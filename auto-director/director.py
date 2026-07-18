@@ -492,6 +492,7 @@ class ObsDriver:
         posY = min(0.0, max(self.CH - shs, posY))
         try:
             self.cl.set_scene_item_transform(scene, iid, {
+                "boundsType": "OBS_BOUNDS_NONE",   # 清残留边界框(否则覆盖 scale 致黑边/变形)
                 "scaleX": float(sc), "scaleY": float(sc),
                 "positionX": float(posX), "positionY": float(posY),  # 转 Python float:跟踪值是 numpy float32,JSON 不认
                 "cropLeft": 0, "cropRight": 0, "cropTop": 0, "cropBottom": 0,

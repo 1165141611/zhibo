@@ -119,7 +119,13 @@ pc-service 把播放器 IPC 接进 WebSocket,并加曲库列表/点歌队列(供
   {"cmd":"kvol","value":70}          // 伴奏音量 0-100(手机音量键百分比同步)
   {"cmd":"kseek","ms":90000}         // 定位
   {"cmd":"kshow"} {"cmd":"khide"} {"cmd":"player_toggle"}  // 歌词窗显隐
+  {"cmd":"director","on":true}       // 自动切镜运镜开关(开→托管 director;关→切主机+可手动放大)
+  {"cmd":"cam_zoom","value":170}     // 主镜头(cam1)数字放大 100~250(仅 director 关时;居中放大)
   ```
+- **自动切镜(auto-director)托管**:`director` 开=`Popen(python auto-director/director.py)`(它接管 OBS 切镜运镜);
+  关=终止进程 + pc-service 直接 obs-websocket **切主机 cam1 + 应用 `cam_zoom` 放大**(cover 铺满不变形/防黑边)。
+  两者互斥独占 OBS,不打架。见 `_start_director/_stop_director/set_director/_obs_cut_main/_obs_zoom_main` +
+  `config.DIRECTOR_PATH/OBS_HOST/OBS_PORT/MAIN_CAM_SCENE/MAIN_CAM_SOURCE`。STATE 加 `director_on`/`cam_zoom` 广播回 App。
 - **WS 状态推送**(电脑→App,`{"type":"state",...}` 里 K歌字段):`now`(正在唱 `{mid,title,artist}` 或 null)、
   `queue`(`[{mid,title,artist}]`)、`k_playing`/`k_pos`/`k_dur`(ms)/`k_key`/`k_vocal`/`k_vol`(0-100)/
   `k_title`/`k_artist`、`player_visible`、`lib_count`。**唱完切下一首开头暂停(不自动连播)**:`server.py` 的

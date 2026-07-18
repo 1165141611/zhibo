@@ -154,7 +154,8 @@ private fun App(vm: RemoteViewModel) {
                     )
                     "remote" -> RemoteScreen(
                         st = st, host = vm.currentHost(),
-                        onScene = vm::setScene, onReset = vm::resetScene,
+                        onReset = vm::resetScene,
+                        onDirector = vm::setDirector, onCamZoom = vm::setCamZoom,
                         onStudio = vm::toggleStudio, onPlayerWin = vm::togglePlayerWindow,
                         onPitch = vm::togglePitch, onSetlist = vm::toggleSetlist,
                         onOpenSettings = { showSettings = true },
