@@ -113,7 +113,8 @@ class RemoteClient(
                 val arr: JSONArray = JSONObject(body).optJSONArray("songs") ?: JSONArray()
                 (0 until arr.length()).map {
                     val s = arr.getJSONObject(it)
-                    Song(s.optString("mid"), s.optString("title"), s.optString("artist"))
+                    Song(s.optString("mid"), s.optString("title"), s.optString("artist"),
+                         plays = s.optInt("plays", 0))
                 }
             }
         } catch (_: Exception) { null }

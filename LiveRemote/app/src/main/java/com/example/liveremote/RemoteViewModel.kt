@@ -98,7 +98,9 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshLibrary() {
         viewModelScope.launch(Dispatchers.IO) {
             client.fetchLibrary()?.let { list ->
-                withContext(Dispatchers.Main) { _library.value = list.sortedBy { it.title } }
+                // 默认按点歌次数倒序(常点的浮到最前),同次数按歌名升序
+                val sorted = list.sortedWith(compareByDescending<Song> { it.plays }.thenBy { it.title })
+                withContext(Dispatchers.Main) { _library.value = sorted }
             }
         }
     }

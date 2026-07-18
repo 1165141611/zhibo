@@ -1019,8 +1019,10 @@ async def _handle_cmd(data):
     elif cmd == "cam_zoom":
         v = max(100, min(250, int(data.get("value", 100))))
         STATE["cam_zoom"] = v
-        if not STATE.get("director_on"):      # 仅 director 关时手动放大主机;开着由 director 控
-            _obs_zoom_main(v)
+        # 放大由常驻 director 的手动主镜模式应用(带人脸跟随):cam_zoom 随本命令末尾的广播下发给 director。
+        # 仅在关闭自动切镜时可调(App 已禁用);确保 director 在跑(从没开过自动切镜也能直接拖滑块放大)。
+        if not STATE.get("director_on"):
+            _start_director()
     elif cmd == "ping":
         # 异步刷新一下音量读数(QQ音乐 可能刚开),不阻塞事件循环
         schedule_qq_volume_read()
@@ -1052,9 +1054,11 @@ async def ws_endpoint(ws: WebSocket):
 @app.get("/library")
 async def get_library():
     man = library.manifest()
-    songs = [{"mid": m, "title": v.get("title", ""), "artist": v.get("artist", "")}
+    songs = [{"mid": m, "title": v.get("title", ""), "artist": v.get("artist", ""),
+              "plays": int(v.get("plays", 0))}
              for m, v in man.items()]
-    songs.sort(key=lambda s: (s["title"] or ""))
+    # 默认按点歌次数倒序(常点的浮到最前),同次数按歌名升序稳定排列
+    songs.sort(key=lambda s: (-s["plays"], s["title"] or ""))
     return {"count": len(songs), "songs": songs}
 
 
@@ -1272,14 +1276,13 @@ def _stop_director():
 
 
 def set_director(on):
-    """开→托管 director(它接管 OBS 切镜运镜);关→停 director + 立即回主机 + 应用当前放大档位。"""
+    """自动切镜开关 = director 的模式切换(director 常驻,不再启停进程):
+    开→自动编排;关→手动主镜(director 锁 cam1 + 人脸跟随 + 按 cam_zoom 放大)。
+    两种模式 cam1 都交给常驻 director,pc-service 只切一次场景做基线、不再自己变换 cam1。
+    director_on/cam_zoom 随 STATE 广播下发给 director(它是 WS 客户端,据此切模式/放大)。"""
     STATE["director_on"] = bool(on)
-    if on:
-        _start_director()
-    else:
-        _stop_director()
-        _obs_cut_main()
-        _obs_zoom_main(STATE.get("cam_zoom", 100))
+    _start_director()          # 常驻:确保 director 在跑(幂等);关闭时也要它跑来做手动跟随
+    _obs_cut_main()            # 即时基线:程序画面切到主机(变换/放大/跟随由 director 持续接管)
 
 
 import atexit as _atexit
@@ -1851,6 +1854,7 @@ def k_enqueue(mid):
     global _now_mid
     if not mid:
         return
+    library.bump_play(mid)                 # 点歌次数 +1(手机端点歌列表默认按次数倒序)
     _queue.append(mid)
     if _now_mid is None:
         _now_mid = _queue.pop(0)

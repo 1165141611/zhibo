@@ -12,6 +12,9 @@
 
 ## 文件
 
+- `config_schema.py` + `director_config.json` —— **切镜/运镜参数的配置系统**。schema 是单一事实源（默认/类型/范围/中文标签/
+  分组 + 校验规则）；JSON 是可编辑数据（首次运行生成、gitignore、**改存即热重载生效**）。参数不再散在源码里，
+  越界钳位 + 非法枚举丢弃 + 跨字段纠正，坏配置不搞崩 director。分组/校验/热重载/未来 UI 详见 [GUIDE §7](GUIDE.md)。
 - `director.py` —— **OBS 自动切镜 + 运镜驱动（独立进程·可整体删除）**。纯消费 pc-service 只读接口
   （WS 实时进度 + `/song/{mid}/karaoke`）+ 驱动 OBS（obs-websocket v5）。**不碰绿幕播放器、不碰 pc-service 核心**，
   对播放器零性能开销。状态机+护栏与 `director-sim.html` 一致（已单测逐帧对齐）。
@@ -22,6 +25,31 @@
       + **随机运镜**（`static/push/pull/pan/drift`）+ **变化停留**（主歌5-9s/副歌3-6s/间奏6-11s，18% 概率多停留），
       并**用满 3 机位**（`STATE_CAMS` 加权、不连切同机、尽量不连同景别）、**每 ~45s 强制广角呼吸**、**段落切换即切**、
       **前奏/间奏也持续切+运镜**（不再一次定住）。调色板/权重全在 `SHOT_PALETTE`/`STATE_CAMS`/`HOLD_RANGE`，好调。
+    - **日常动态特写（closeup，1/2 机位）**：主歌/副歌高频抽中（`SHOT_PALETTE` 里 `("close","closeup")`/`("xclose","closeup")`）。
+      **不再用固定 z（旧 close 1.3/xclose 1.75，人一远头占比就上不去，看着不像特写）**，而是**按 YuNet 实测脸框动态放大到
+      「人头占画面高 ~1/2」**（xclose ~0.62），并复用 hero 三件套：**锁脸慢跟随 + 拟人轻晃 + 轻推/拉**（整个停留内缓动）。
+      只在 `CLOSEUP_CAMS`（cam1/cam2）生效，cam3 抽中退静态（远机高倍放大糊）。参数 `CLOSEUP_*`。
+    - **默认主镜纯跟随（follow）**：`PAUSE`（唱完回主机 cam1 待机）用 `["loose","follow"]` —— 正常景别 + **只锁脸慢跟随、
+      不推拉不横移**（`still=True`）。待机 `not playing` 时钟冻结，故 z 稳定不动、`cx/cy` 低通跟随不依赖时钟每帧照跟，
+      人一动画面轻轻跟上。跟随强度同 closeup 的 `CLOSEUP_FOLLOW_ALPHA`。
+  - **手动主镜模式（App 关闭自动切镜，`manual_tick`）**：director 现在**常驻**，「自动切镜运镜」开关 = 切模式而非启停进程。
+    关闭 = 锁 cam1 + **人脸跟随（同待机 follow 内核）** + 按 `cam_zoom` 放大（`z=cam_zoom/100`，夹 `manual.z_max`，
+    `manual.zoom_lowpass` 平滑滑块）。pc-service 不再 kill 进程 / 不再自己变换 cam1（单写者不打架）。参数见配置 `manual` 组。
+    - **横移镜头（trackpan，1/2 机位）**：人像从画面一侧**拟人横扫到另一侧**（方向随机 L↔R），有**正常景别**与
+      **放大到头占½**两档；与 closeup 同一套锁脸慢跟随 + 拟人轻晃，全程不露黑边（cover 横向余量）。主歌/副歌各占 ~24%/34%。
+      端点 `CLOSEUP_PAN_AX`。取代旧的单向 `trackLR`（后者仍保留给间奏/前奏的广角横移）。
+    - **招牌长运镜（hero，主机 cam1 专属 ~18s）**：**每首歌保证触发一次**（`HERO_GUARANTEE`：载入即规划一个目标时刻，
+      落在演唱区间前半或后半随机、避开开口与歌尾；到点若逢间奏则**顺延到下一句**，绝不卡间奏）；此外主歌/副歌切到主机时
+      还按 `HERO_PROB`/`HERO_COOLDOWN` 有额外机会（**每首歌最多 `HERO_MAX_PER_SONG`＝2 次、每段块最多一次**，再多显腻）。
+      两阶段长镜——① **慢推 15s**：从最远（z=1.0 铺满不黑边）`smoothstep`
+      缓推到「**人头占画面高 ≈3/4**」超特写、头靠上，
+      全程叠**两正弦左右轻晃**（仿真人手持）；② **速拉 3s**：`outCubic` 后撤到「**头占 <1/2**」中景收尾。头占比经
+      `_z_for_head` 由 YuNet 实测脸框高（`CAM_FACE_H`）换算成 z（16:9→4:3 高度受限：`输出头高比=头源高比×z`）。
+      参数见脚本顶 `HERO_*`（时长/头占比/摇晃/冷却/概率/z 上下限，`HERO_ENABLE=False` 可关）。
+      **关注点 `cx/cy` 慢速低通跟随**（起镜对准真人头，之后按 `HERO_FOLLOW_ALPHA` 低通跟随——既不逐帧硬跟致抖、
+      也不锁死致人一动就对不准，只平滑跟上直播中的轻微移动）；脸框高先钳 `HERO_FACEH_CLAMP` 防误检甩飞 z，
+      `z_end ≤ z_near×HERO_PULL_RATIO` 保证后拉明显。
+      单独循环观察：**`python hero_test.py --no-track --gap 4`**（不走状态机、不需放歌；占位图上关跟踪看纯几何）。
   - **实时头部跟踪（YuNet）**：后台线程用 `cv2.FaceDetectorYN`（模型 `models/yunet.onnx`）定时抓每台画面检测头部，
     EMA 平滑后写 `CAM_FACE_LIVE`（眼中点）；特写/三分每次切镜读它**锁定最新头位并跟人移动**，不与 OBS 插件冲突。
     `close/xclose/thirds` 的 `ay≈0.4` 给足头顶留白（眼睛落上三分，解决"头偏下")。`TRACK_FACE=False` 可关，退回静态 `CAM_FACE`。
@@ -37,6 +65,11 @@
   - `python director.py` —— 接真实播放器（改脚本顶 `OBS_PASSWORD`、`SCENES`、`PC_SERVICE`；需 pc-service+播放器在放歌）。
   - 删除测试：删 `auto-director/` 整个目录 + 在 OBS 里删掉 cam1/2/3 场景，回滚 pc-service 的 CORS/chorus
     两处只读加法即可，播放器无痕。
+- `hero_test.py` —— **单独循环测试主机招牌长运镜(hero)**。只对 cam1 反复跑「慢推15s到头占3/4超特写(带手持轻晃)→速拉3s回头占<1/2中景」,
+  不走状态机、不切别机位、不需 pc-service/放歌,纯看这一个运镜手感。复用 director 的 `start_hero/tick_hero` + `ObsDriver`。
+  `--no-track`(占位图观察用静态人脸位)/`--gap N`(两遍间隔)/`--once`(只一遍)。改手感改 director.py 顶 `HERO_*` 再重跑。
+  ⚠️ **跑它前必须先关正式 director**(安卓遥控页「自动切镜运镜」开关 off,或 WS 发 `director {on:false}`)——
+  否则 pc-service 托管的 director 进程和本脚本**两路 30Hz 同时改 cam1 变换会狂闪抖动**;测完再打开开关恢复。
 - `wire_camera.py` —— **把某机位场景换成真实摄像头**(UVC/虚拟摄像头),保持源名 `content_<cam>` 故 director 无需改。
   `python wire_camera.py`（列设备）/ `cam1 "#1"` / `cam2 "#2"` / `cam3 "#3"`（三台手机全走 iVCam,按连接顺序编号）。
   **存在就改设备、不存在才新建**(避开删除异步竞态)、**等比铺满 4:3 画布**（16:9 居中裁切不变形）、精确名优先。

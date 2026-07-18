@@ -3,3 +3,6 @@ assets/
 __pycache__/
 # YuNet 模型:从 OpenCV zoo 下载,可再生,不入库
 models/
+# 运镜/切镜配置:首次运行由 config_schema.py 默认值生成,本机自调,不入库(schema 才是事实源)
+director_config.json
+director_config.json.tmp

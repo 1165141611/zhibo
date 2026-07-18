@@ -72,6 +72,20 @@ def pending_rename():
     return [mid for mid, m in _MANIFEST.items() if m.get("needs_name")]
 
 
+def bump_play(mid):
+    """点歌一次 → 该曲"点歌次数"(plays)+1,持久化到 library.json 并触发刷新
+    (手机端点歌列表默认按 plays 倒序,常点的歌浮到最前)。plays 只存清单、不写 meta.json
+    (meta.json 会被启动迁移按 QRC 重写,存这里会被冲掉;清单才是列表的权威源)。"""
+    ent = _MANIFEST.get(mid)
+    if not ent:
+        return
+    ent["plays"] = int(ent.get("plays", 0)) + 1
+    _save_manifest(_MANIFEST)
+    if _on_change:
+        _on_change()   # 刷托盘 + 推手机(顺序变了)
+    return ent["plays"]
+
+
 def rename(mid, title, artist):
     """手动订正歌名/歌手:更新内存清单 + library.json + meta.json,清 needs_name,触发刷新。
     供 server 的"点通知改名"用。返回是否成功。"""
@@ -169,7 +183,8 @@ def _import_one(mid, man):
     meta = _qrc_meta(os.path.join(dst, mid + ".qrc"))   # QRC 未下完会抛异常 → 本首不落库,下轮重试
     json.dump(meta, open(os.path.join(dst, "meta.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
-    man[mid] = {**meta, "added": time.time()}
+    man[mid] = {**meta, "added": time.time(),
+                "plays": int(man.get(mid, {}).get("plays", 0))}   # 重入库保留已有点歌次数
     _save_manifest(man)
     return meta
 

@@ -6,6 +6,7 @@ data class Song(
     val title: String,
     val artist: String,
     val dur: String = "",
+    val plays: Int = 0,      // 点歌次数(pc-service 记录);点歌列表默认按它倒序
 )
 
 /** App 全局状态。由 pc-service 的 WS `state` 消息 + 本地 UI 聚合。字段映射见 UI_SPEC.md 第四节。 */

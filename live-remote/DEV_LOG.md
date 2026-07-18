@@ -317,7 +317,7 @@ pc-service 升级为电脑端 K歌中枢(总体方案见根 `KARAOKE_SYSTEM.md`)
 
 pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供手机 App 对接(路线图第②步服务器侧,至此第②步整体完成)。
 
-- **曲库列表**:`GET /library` → `{count, songs:[{mid,title,artist}]}`(读 `library.manifest()`,按歌名排序),注册在 StaticFiles mount 之前。
+- **曲库列表**:`GET /library` → `{count, songs:[{mid,title,artist,plays}]}`(读 `library.manifest()`),**默认按点歌次数 `plays` 倒序、同次数按歌名升序**,注册在 StaticFiles mount 之前。
 - **点歌队列**(`server.py` 全局 `_queue`/`_now_mid`):`k_enqueue(mid)`(append,空闲即 `k_play_next`)、`k_play_next()`(pop 队首 → 给 player 发 `load/show/play`;空则停末尾)、`k_remove(idx)`、`k_clear()`;每次变更调 `_sync_queue_state()` 把 `STATE["now"]`(`{mid,**song_meta}` 或 null)、`STATE["queue"]`(带 meta 列表)刷好并推手机。
 - **控制指令**(`_handle_cmd` 新增,全转成播放器 IPC):`kqueue_add/remove/next/clear`、`kplay/kpause/kplaypause`、`kkey`(绝对半音)、`kvocal`(原唱/伴奏)、`kseek`、`kshow/khide`。
 - **STATE 解析 + 唱完自动下一首**:`_player_reader` 除 `VIS:` 外,解析 player 每 500ms 的 `STATE {json}` → 更新 `k_playing/k_pos/k_dur/k_key/k_vocal/k_mid/k_title/k_artist` 并推手机;检测 `prev_playing and not playing and dur>0 and pos>=dur-800`(=当前歌自然放到尾)→ 调 `k_play_next()` 自动切下一首。
@@ -325,6 +325,10 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
 - **STATE 字段**:`server.STATE` 加 `k_playing/k_pos/k_dur/k_key/k_vocal/k_mid/k_title/k_artist/now/queue`,随 WS `state` 推。
 - **验证**:`/library` 真实 HTTP 返回 5 首(含监听器新收的《理想》);入队自动开唱、控制指令、唱完自动下一首全通。
 - **补**(2026-07-13,为手机 App):加 `kqueue_move{from,to}` 队列重排指令(`k_move`),供手机长按拖动/置顶。
+- **补**(2026-07-16,点歌次数):每次点歌(`k_enqueue` → `library.bump_play(mid)`)给该曲 `plays` +1,
+  存进 `library.json`(只存清单,不写 meta.json——启动迁移会按 QRC 重写 meta.json 冲掉它)。`/library`
+  改按 `plays` 倒序返回;手机 App(`Song.plays` + `RemoteViewModel.refreshLibrary` 按 `plays` 倒序、
+  同次数按歌名)默认点歌列表常点的浮最前。**改了手机端,已 `assembleDebug` + adb 装机**。
 - **补**(2026-07-13,演唱页卡拉OK数据):`karaoke_data.py` + `GET /song/{mid}/karaoke` → 某首歌的 QRC 逐字
   时间轴 + `.note` 音高线(归一化 0..1)。复用 karaoke-player 的 `tripledes`(不引 numpy),按 mid 缓存;
   实测郭源潮 30 行 / 390 音符、吉姆餐厅 34 行 / 450 音符,404 正常。手机演唱页在切歌时拉一次喂 `KaraokeStage`。
@@ -667,4 +671,16 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
   - **验证**:真实进程 `_is_qq_pid`——QQMusic(23912)=True、直播伴侣的 MediaSDK(26088)=False;真实
     解析只命中 PLAYBACK 1/2 上 1 个 QQMusic 会话(设备/端点缓存各 1);三个时序仿真用例重跑全过。
     **现场已恢复**:两个 MediaSDK 会话 + VIRTUAL REC 3/4 端点已设回 100%,QQMusic 会话设回 60%。
+
+## 十二、自动切镜开关改为"director 常驻·模式切换"(2026-07-18)
+「自动切镜运镜」开关以前 = **启停 director 子进程**:关 = `terminate()` + `_obs_cut_main` + `_obs_zoom_main`(居中静态放大)。
+问题:人脸跟踪/跟随全在 director 进程,进程一停就**没跟随**——关闭后的手动主镜是死板的居中放大,和"唱完待机跟脸"不一致。
+- **改法(server.py)**:`set_director(on)` 现在**总是 `_start_director()`(幂等常驻)+ `_obs_cut_main()` 基线切场景 + 广播**,
+  **不再 `_stop_director`/`_obs_zoom_main`**;开关只改 `STATE["director_on"]` 并随 `{type:state,...}` 广播下发。
+  `cam_zoom` 处理只 clamp+存值+(必要时幂等 `_start_director`),**不再自己 `_obs_zoom_main`**——cam1 的变换/放大/跟随全交给常驻 director。
+  `_stop_director` 仅留 atexit 防孤儿。
+- **director 侧**:消费广播的 `director_on`/`cam_zoom`,新增 `manual_tick`——关闭自动切镜 = 锁 cam1 + 人脸跟随(同待机 follow 内核)
+  + `z=cam_zoom/100`(夹上限、低通平滑滑块)。开=自动编排照旧。**单写者**(只有 director 写 cam1 变换),不打架。
+- **App 无需改**(开关发 `director{on}`、滑块发 `cam_zoom{value 100~250}`、滑块 `enabled=!directorOn` 语义全吻合)。
+  细节与参数(`manual` 配置组)见 `auto-director/GUIDE.md` §7 / "由 App/pc-service 开关"。**限制**:director 常驻后崩溃无 watchdog,重开开关即恢复。
     **需重启托盘服务生效。**

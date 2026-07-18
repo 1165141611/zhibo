@@ -76,6 +76,9 @@ WebSocket 客户端连 pc-service(`ws://<电脑IP>:8765/ws`),曲库走 `GET /lib
 >   面板用 **lambda 版 `offset{}`**、蒙层淡出用 `graphicsLayer{}`(高频值只在布局/绘制阶段读,拖动零重组,
 >   符合性能红线);`draggable` 自带松手速度,下拉超 1/4 高度或快甩(>1500px/s)即收起,否则弹回。
 >   手势不挂列表区,避免与 `LazyColumn` 滚动嵌套冲突。
+> - **点歌列表按点歌次数倒序(2026-07-16)**:`Song` 加 `plays` 字段(pc-service `/library` 返回,
+>   每次点歌 +1 存 `library.json`);`RemoteViewModel.refreshLibrary` 由"按歌名排序"改为**按 `plays`
+>   倒序、同次数按歌名升序**——常点的歌浮到点歌抽屉最前。服务端也已按 `plays` 倒序返回,前后一致。
 > - **点歌抽屉触底分页(2026-07-14)**:`PickerSheet` 的 `LazyColumn` 只喂过滤结果的前 `visible` 条
 >   (每批 `PICKER_PAGE=60`),`derivedStateOf` 监听"最后可见项进入倒数 6 条"→ 追加一批;追加后若仍在
 >   底部附近,`shown.size` 变化会让 effect 重跑继续追加,直到离开底部或全部显示(不会卡在"差几条不加载")。
