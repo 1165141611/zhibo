@@ -1541,6 +1541,11 @@ def _open_performer_dialog():
     threading.Thread(target=_dlg, daemon=True).start()
 
 
+def _fmt_key(k):
+    """默认调式标签:0=原调,正负半音带符号。"""
+    return "原调" if int(k) == 0 else ("%+d" % int(k))
+
+
 def _open_library_browser(selftest=False):
     """点托盘"曲库: N 首" → 曲库管理窗(高性能版):
     - 搜索框 **200ms 防抖**(老版每敲一键全量重建所有行,正是卡顿主因之一);
@@ -1628,6 +1633,21 @@ def _open_library_browser(selftest=False):
                 for r in rows:
                     r["paint"]()
 
+            def _bump_key(mid, delta, label, holder):
+                """曲库管理页 −/+ 调默认调式:夹到 [-6,6],持久化(library.set_key),就地更新标签;
+                若这首正在唱(_now_mid)则**实时下发**边调边听。改的是"下次点到这首用的默认调"。"""
+                nv = max(-6, min(6, holder["k"] + delta))
+                if nv == holder["k"]:
+                    return
+                holder["k"] = nv
+                library.set_key(mid, nv)
+                try:
+                    label.config(text=_fmt_key(nv))
+                except Exception:
+                    pass
+                if mid == _now_mid:
+                    _player_send("key " + str(nv))
+
             def _add_row(mid, m, idx):
                 """渲染一行(idx 定斑马纹底色)。行结构/交互与旧版完全一致。"""
                 title = (m.get("title") or "").strip()
@@ -1654,13 +1674,24 @@ def _open_library_browser(selftest=False):
                 l_time = tk.Label(rf, text=tstr, anchor="w", width=11,
                                   bg=base, fg="#999999")
                 l_time.grid(row=0, column=3, sticky="w", padx=4)
+                # 默认调式:−  <调>  +(左减右加,中间显示当前默认;点即存,正在唱的实时应用)
+                kf = tk.Frame(rf, bg=base)
+                kf.grid(row=0, column=4, padx=(6, 2))
+                kh = {"k": int(m.get("key", 0))}
+                tk.Button(kf, text="−", width=2, takefocus=0,
+                          command=lambda mid=mid: _bump_key(mid, -1, kl, kh)).pack(side="left")
+                kl = tk.Label(kf, text=_fmt_key(kh["k"]), width=4, bg=base,
+                              fg="#111111", font=("", 9, "bold"))
+                kl.pack(side="left")
+                tk.Button(kf, text="+", width=2, takefocus=0,
+                          command=lambda mid=mid: _bump_key(mid, +1, kl, kh)).pack(side="left")
                 tk.Button(rf, text="编辑", width=5,
                           command=lambda mid=mid: _edit(mid)).grid(
-                    row=0, column=4, padx=(6, 2), pady=3)
+                    row=0, column=5, padx=(6, 2), pady=3)
                 tk.Button(rf, text="播放", width=5,
                           command=lambda mid=mid: _play(mid)).grid(
-                    row=0, column=5, padx=(2, 8), pady=3)
-                cells = (l_name, l_art, l_time)
+                    row=0, column=6, padx=(2, 8), pady=3)
+                cells = (l_name, l_art, l_time, kf, kl)
 
                 def _mk_paint(rf=rf, cells=cells, chk=chk, base=base, mid=mid):
                     def paint(hover=False):
@@ -1806,6 +1837,16 @@ def _sync_queue_state():
     STATE["queue"] = [{"mid": m, **(library.song_meta(m) or {})} for m in _queue]
 
 
+def _player_load(mid):
+    """载入某曲并应用它保存的**默认调式**:player 的 `load` 会归位清调到 0(原调),
+    随后按曲库存的默认 key 补下发 `key <n>`(非 0 才发),这样手机点到这首就是调好的调,
+    不必每次手动升降。player 端 stdin 单线程 FIFO,load→key 顺序不乱。"""
+    _player_send("load " + mid)
+    k = library.get_key(mid)
+    if k:
+        _player_send("key " + str(k))
+
+
 def k_advance_paused():
     """自然唱完时调用:把下一首装载到**开头并保持暂停**(等主播手动开唱),队空则清空当前曲。
     这样歌曲间歇 BGM 能顶上——手机端"演唱↔BGM 联动"看到演唱停止,**缓冲 2 秒后**自动恢复它
@@ -1814,7 +1855,7 @@ def k_advance_paused():
     global _now_mid
     if _queue:
         _now_mid = _queue.pop(0)
-        _player_send("load " + _now_mid)   # load 自带:归位到 0、清调、切回伴奏、暂停
+        _player_load(_now_mid)             # load + 应用曲库存的默认调式
     else:
         _now_mid = None
         _player_send("pause")
@@ -1827,7 +1868,7 @@ def k_play_next():
     global _now_mid
     if _queue:
         _now_mid = _queue.pop(0)
-        _player_send("load " + _now_mid)
+        _player_load(_now_mid)
         _player_send("play")
     else:
         _now_mid = None
@@ -1842,7 +1883,7 @@ def k_play_mid(mid):
     if not mid:
         return
     _now_mid = mid
-    _player_send("load " + mid)
+    _player_load(mid)
     _player_send("play")
     _sync_queue_state()
 
@@ -1858,7 +1899,7 @@ def k_enqueue(mid):
     _queue.append(mid)
     if _now_mid is None:
         _now_mid = _queue.pop(0)
-        _player_send("load " + _now_mid)   # load 自带:归位到 0、清调、切回伴奏、暂停
+        _player_load(_now_mid)             # load + 应用曲库存的默认调式
     _sync_queue_state()
 
 

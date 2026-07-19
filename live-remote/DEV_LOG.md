@@ -329,6 +329,12 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
   存进 `library.json`(只存清单,不写 meta.json——启动迁移会按 QRC 重写 meta.json 冲掉它)。`/library`
   改按 `plays` 倒序返回;手机 App(`Song.plays` + `RemoteViewModel.refreshLibrary` 按 `plays` 倒序、
   同次数按歌名)默认点歌列表常点的浮最前。**改了手机端,已 `assembleDebug` + adb 装机**。
+- **补**(2026-07-16,每曲默认调式):曲库管理页每行加 **`−  <调>  +`** 控件(`_bump_key`),点即
+  `library.set_key(mid, n)` 存进 `library.json`(夹 [-6,6],0=原调;**不触发全量刷新**,就地更新标签不丢
+  滚动位置);正在唱这首则实时 `_player_send("key n")` 边调边听。载歌统一走 `_player_load(mid)`=
+  `load`(player 会清调到 0)+ 若默认调非 0 补下发 `key n`,**手机点到这首直接是调好的调**。
+  **手机端不用改**:App 的 `key` 本就跟随服务端推的 `k_key`(载入后 player 上报 `key=n` → server 推
+  → App 显示),实测点歌 鼓楼(默认 +3)载入后 `k_key=3` 自动生效,无需重装 App。
 - **补**(2026-07-13,演唱页卡拉OK数据):`karaoke_data.py` + `GET /song/{mid}/karaoke` → 某首歌的 QRC 逐字
   时间轴 + `.note` 音高线(归一化 0..1)。复用 karaoke-player 的 `tripledes`(不引 numpy),按 mid 缓存;
   实测郭源潮 30 行 / 390 音符、吉姆餐厅 34 行 / 450 音符,404 正常。手机演唱页在切歌时拉一次喂 `KaraokeStage`。

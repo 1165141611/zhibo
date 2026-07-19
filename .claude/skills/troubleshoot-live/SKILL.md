@@ -49,6 +49,20 @@ except Exception as e:
 ### ▶ 机位画面错乱(切到别的机位/画面对不上)
 - iVCam `#N` 按**连接顺序**分配,开机顺序变了映射就错。列设备核对,用 `wire-camera` skill 重接。
 
+### ▶ 某机位黑屏 / 看不到画面(尤其大疆 UVC)
+- **先别怀疑接错**:查 `content_<cam>` 绑的设备对不对、在不在设备列表且 enabled——大疆是 `OsmoAction6`。绑对了就往下走。
+- **截图确认无信号**:`get_source_screenshot('content_<cam>',...)` 亮度全 0 = 设备枚举到了但采集没出帧(OBS 抢设备早于相机推 UVC 帧,或 USB 会话掉了)。
+- **修法:重激活源**(最常一招就好):
+  ```python
+  import time, obsws_python as obs
+  cl = obs.ReqClient(port=4455, password='')
+  cl.set_input_settings('content_cam3', {'active': False}, True); time.sleep(1.2)
+  cl.set_input_settings('content_cam3', {'active': True},  True)   # 相机重协商 UVC,画面即回
+  ```
+  等价 OBS 里双击源属性→确定,或右键停用再启用。
+- **救不回再查硬件**:大疆没进「USB 摄像头/Webcam」模式(别停在传输/存储)、被别的 App 独占相机、USB 线/口。
+- 详见 `auto-director/GUIDE.md §8` 第 18 条。
+
 ## 修完
 - 复述根因 + 改了什么;能重启的组件重启验证(pc-service / director / OBS 变换)。
 - 若是新坑,提示补进 `GUIDE.md §8`。

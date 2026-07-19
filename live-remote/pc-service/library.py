@@ -86,6 +86,23 @@ def bump_play(mid):
     return ent["plays"]
 
 
+def get_key(mid):
+    """某曲保存的默认调式(半音,无则 0=原调)。"""
+    return int((_MANIFEST.get(mid) or {}).get("key", 0))
+
+
+def set_key(mid, key):
+    """设某曲的默认调式(半音,夹到 [-6,6]),持久化到 library.json。**不触发全量刷新**
+    (托盘就地更新标签,避免重建列表丢滚动位置)。手机点到这首时由 server 载入时下发应用。"""
+    ent = _MANIFEST.get(mid)
+    if not ent:
+        return None
+    key = max(-6, min(6, int(key)))
+    ent["key"] = key
+    _save_manifest(_MANIFEST)
+    return key
+
+
 def rename(mid, title, artist):
     """手动订正歌名/歌手:更新内存清单 + library.json + meta.json,清 needs_name,触发刷新。
     供 server 的"点通知改名"用。返回是否成功。"""
@@ -184,7 +201,8 @@ def _import_one(mid, man):
     json.dump(meta, open(os.path.join(dst, "meta.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
     man[mid] = {**meta, "added": time.time(),
-                "plays": int(man.get(mid, {}).get("plays", 0))}   # 重入库保留已有点歌次数
+                "plays": int(man.get(mid, {}).get("plays", 0)),    # 重入库保留已有点歌次数
+                "key": int(man.get(mid, {}).get("key", 0))}        # 及默认调式
     _save_manifest(man)
     return meta
 

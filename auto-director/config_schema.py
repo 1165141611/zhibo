@@ -18,7 +18,7 @@ import copy
 CAMS = ["cam1", "cam2", "cam3"]
 STATES = ["INTRO", "VERSE", "CHORUS", "INTERLUDE", "OUTRO", "PAUSE"]
 PRESETS = ["full", "loose", "high", "close", "xclose", "thirds_l", "thirds_r"]
-MOVES = ["static", "push", "pull", "pan", "drift", "trackLR", "closeup", "trackpan", "follow"]
+MOVES = ["static", "push", "pull", "pan", "drift", "trackLR", "closeup", "trackpan", "follow", "descend", "ascend"]
 EASES = ["linear", "inOutCubic", "outCubic"]
 
 # ── 标量字段:group → key → 规格 ────────────────────────────
@@ -126,16 +126,16 @@ STRUCT_DEFAULTS = {
         "INTERLUDE": [6, 11], "OUTRO": [5, 9], "PAUSE": [10, 14],
     },
     "palette": {
-        "INTRO":     [["full", "push", 2], ["loose", "pan", 2], ["loose", "drift", 2], ["full", "pull", 1],
-                      ["close", "push", 1], ["loose", "trackLR", 1], ["high", "static", 1]],
+        "INTRO":     [["full", "descend", 2], ["full", "push", 1], ["loose", "pan", 2], ["loose", "drift", 2],
+                      ["full", "pull", 1], ["close", "push", 1], ["loose", "trackLR", 1], ["high", "static", 1]],
         "VERSE":     [["loose", "static", 2], ["close", "closeup", 3], ["close", "trackpan", 2], ["loose", "trackpan", 2],
                       ["close", "static", 1], ["full", "static", 1], ["loose", "push", 1], ["full", "pull", 1],
                       ["loose", "drift", 1], ["thirds_l", "static", 1], ["thirds_r", "static", 1], ["xclose", "closeup", 1]],
         "CHORUS":    [["close", "closeup", 3], ["close", "trackpan", 3], ["xclose", "closeup", 1], ["loose", "trackpan", 1],
                       ["thirds_l", "push", 1], ["thirds_r", "push", 1], ["close", "static", 1], ["loose", "push", 1]],
-        "INTERLUDE": [["full", "pan", 3], ["loose", "drift", 2], ["close", "push", 2], ["full", "pull", 2],
-                      ["loose", "trackLR", 1], ["high", "static", 1]],
-        "OUTRO":     [["loose", "pull", 3], ["full", "pull", 2], ["close", "pull", 1], ["full", "drift", 1]],
+        "INTERLUDE": [["full", "descend", 2], ["full", "ascend", 1], ["full", "pan", 2], ["loose", "drift", 2],
+                      ["close", "push", 2], ["full", "pull", 1], ["loose", "trackLR", 1], ["high", "static", 1]],
+        "OUTRO":     [["full", "ascend", 2], ["loose", "pull", 2], ["full", "pull", 2], ["close", "pull", 1], ["full", "drift", 1]],
         "PAUSE":     [["loose", "follow", 1]],
     },
     "framing": {
@@ -154,6 +154,10 @@ STRUCT_DEFAULTS = {
         "pan":     {"cx_start_delta": 0.12, "cx_start_max": 0.8, "dur": [4.0, 7.0], "ease": "linear"},
         "drift":   {"z_start_factor": 0.93, "dur": [6.0, 10.0], "ease": "linear"},
         "trackLR": {"z_min": 1.34, "ax_start": 0.63, "ax_end": 0.37, "dur": [5.0, 8.0], "ease": "linear"},
+        # cam3 广角电影感组合运镜:前推伴随取景下移(机位下降感)+ 偶尔横移(pan_prob 概率、pan_amp 幅度、方向随机)。
+        # z/cy 同步走(z 越大垂直余量越足,cy 下移越可见);后退版 ascend 反向(从低到高)。tick_move 五维插值实现。
+        "descend": {"z_from": 1.12, "z_to": 1.5, "cy_from": 0.40, "cy_to": 0.60, "pan_prob": 0.5, "pan_amp": 0.14, "dur": [9.0, 15.0], "ease": "inOutCubic"},
+        "ascend":  {"z_from": 1.5, "z_to": 1.12, "cy_from": 0.60, "cy_to": 0.40, "pan_prob": 0.5, "pan_amp": 0.14, "dur": [9.0, 15.0], "ease": "inOutCubic"},
     },
 }
 
@@ -331,7 +335,7 @@ def _ov_moves(rc, cfg, warns):
     tgt = cfg["moves"]
     if "min_move_z" in rc:
         tgt["min_move_z"] = _clampf(rc["min_move_z"], 1.0, 2.0, tgt["min_move_z"])
-    for mv in ("push", "pull", "pan", "drift", "trackLR"):
+    for mv in ("push", "pull", "pan", "drift", "trackLR", "descend", "ascend"):
         if not isinstance(rc.get(mv), dict):
             continue
         for k, v in rc[mv].items():

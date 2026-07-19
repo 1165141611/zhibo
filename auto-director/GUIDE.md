@@ -69,7 +69,7 @@ karaoke-player(绿幕字幕/精确时钟) --STATE 每500ms--> pc-service(中枢)
 
 ### 3.1 歌曲状态机(消费真实逐字轴)
 `current_state(t)` 按真实播放进度判定段落:
-- **PAUSE** 没在播 → 回主机静止
+- **PAUSE** 没在播 / 没点歌 → 回主机 cam1 **待机人脸跟随**(loose `follow`,和关闭自动模式一致)
 - **INTRO** 第一个字之前(某些歌前奏很长,如吉姆餐厅 68s)
 - **OUTRO** 最后一个字之后
 - **CHORUS** 落在手动标注的 `chorus` 区间(未标注则不触发)
@@ -84,7 +84,12 @@ karaoke-player(绿幕字幕/精确时钟) --STATE 每500ms--> pc-service(中枢)
   `xclose` 贴脸超特写(z1.75,仅 cam1) / `thirds_l·thirds_r` 左右三分(z1.5)。
   每台可用景别由 `CAM_PRESETS` 限制:**cam3 大疆远,只做 full/loose/high/close**(不做 thirds/xclose,高倍放大糊)。
 - **运镜 move**:`static` 静止 / `push` 缓推 / `pull` 缓拉后撤 / `pan` 平移 / `drift` 极慢漂移 /
-  `trackLR` 主体从右滑到左 / **`closeup` 动态特写**(见下)。比例按段落:主歌少动、副歌多动、间奏缓动。
+  `trackLR` 主体从右滑到左 / **`closeup` 动态特写**(见下)/ **`descend`·`ascend` cam3 广角组合运镜**(见下)。比例按段落:主歌少动、副歌多动、间奏缓动。
+- **cam3 广角电影感 `descend`/`ascend`(前奏/间奏/尾奏,随机 18~25%)**:给高远大全景一种**从空中下降前推环绕**的感觉——
+  `descend` = z 前推(默认 1.12→1.5,比旧 push 推得多)**同步取景下移**(源纵位 cy 0.40→0.60,画面正中从看上方渐移到看主体 = 机位下降感)
+  **+ 偶尔横移**(`pan_prob=0.5` 概率、`pan_amp=0.14` 幅度、**方向随机** = 环绕);`ascend` 反向(后退 z 减 + 取景上移,从低到高、升空收尾)。
+  用 `tick_move` 五维插值(z/cx/cy)实现,慢(9~15s);防黑边由 `set_framing` 钳制兜底。**不是每次都触发**(调色板里与 push/pan/drift/static 混权重)。
+  参数在配置 `moves.descend`/`moves.ascend`(z 起止、cy 起止、pan_prob/pan_amp、dur、ease)。**注意**:16:9 源进 4:3 画布竖直较紧,下降幅度随 z 增大才充分,故 z 起点留了余量。
 - **动态特写 `closeup`(1/2 机位·主歌副歌高频)**:普通 `close/xclose` 是**固定** z(1.3/1.75),人一离远头占比就上不去、不像特写;
   `closeup` 改为**按 YuNet 实测脸框(`CAM_FACE_H`)动态放大到"头占~1/2"**(`CLOSEUP_HEAD=0.5`,xclose `CLOSEUP_XHEAD=0.62`),
   并复用 hero 三件套:**锁脸慢跟随(`CLOSEUP_FOLLOW_ALPHA`)+ 拟人轻晃(`CLOSEUP_SWAY_AMP`,比 hero 更轻)+ 轻推或拉
@@ -94,8 +99,10 @@ karaoke-player(绿幕字幕/精确时钟) --STATE 每500ms--> pc-service(中枢)
   两端间缓动,方向每次随机),复用 closeup 的锁脸慢跟随 + 拟人轻晃。两档:`close/xclose`=**放大横移(头占~½)**、
   `loose/full`=**正常景别横移**(z 保底 `CLOSEUP_PAN_ZMIN` 留横向余量)。16:9 源进 4:3 画布横向本就有富余,**全程不露黑边**
   (实测 216 帧 0 触边)。与 closeup 同一入口 `start_closeup(...,pan=True)`。取代旧单向 `trackLR`(后者留给间奏/前奏广角横移)。
-- **默认主镜纯跟随 `follow`(唱完回主机待机用)**:`PAUSE` 调色板即 `[["loose","follow",1]]` —— 回到主机 `cam1` 后
-  **正常景别(loose)+ 只锁脸慢跟随、不推拉不横移**(`start_closeup(...,still=True)`:z 起=止、ax 居中)。刻意"纯跟随"
+- **默认主镜纯跟随 `follow`(唱完回主机 / 刚开自动模式没点歌 / 暂停 —— 所有 PAUSE 待机)**:`PAUSE` 调色板即
+  `[["loose","follow",1]]` —— 回到主机 `cam1` 后 **正常景别(loose)+ 只锁脸慢跟随、不推拉不横移**(`start_closeup(...,still=True)`:z 起=止、ax 居中)。
+  主循环在自动模式下**即便 `song is None`(没点歌)也进状态机**判 PAUSE 起 follow;`plan_cut` 的 PAUSE 分支按
+  **`active!=cam1` 或 `mv_kind!="follow"`** 判定(而非仅 `active!=cam1`),否则初始就在 cam1 时永远不会起跟随镜(修 2026-07-18 的待机不跟脸)。刻意"纯跟随"
   是因为待机时 `not playing`、`now_t()` 冻结,推拉/晃动会卡在起点;而 `cx/cy` 的低通跟随不依赖时钟,每帧照跟,
   所以待机主镜**稳定不动 z、人一动画面轻轻跟上**。跟随强度同款用 `CLOSEUP_FOLLOW_ALPHA`。
 - **停留时长**:`HOLD_RANGE` 每段随机抽,`LINGER_PROB=0.18` 概率"多停留一会儿"(节奏不均匀)。
@@ -226,7 +233,10 @@ python director.py        # 接真实播放器(需 pc-service + 播放器在放�
 | 推/拉幅度更大更狠 | `apply_shot` 里 push 的 `target.z-0.3`、pull 的 `target.z+0.32` |
 | 超特写更紧 / 更松 | `framing_for` 的 `xclose` z(现 1.75;更清需相机上 1080p) |
 | 特写头顶留白多少 | `framing_for` 里 close/xclose/thirds 的 `ay`(越小头越靠上) |
-| 右→左移镜速度/幅度 | `apply_shot` 里 `trackLR` 的 `dur` 与 `ax` 起止(0.63→0.37) |
+| 右→左移镜速度/幅度 | `moves.trackLR` 的 `dur` 与 `ax_start/ax_end`(0.63→0.37) |
+| cam3 广角前推更多/下降更狠 | `moves.descend` 的 `z_to`(前推终点)、`cy_from/cy_to`(下降幅度) |
+| cam3 组合运镜横移概率/幅度 | `moves.descend`(及 ascend)的 `pan_prob`、`pan_amp` |
+| cam3 下降/上升运镜多频繁 | `SHOT_PALETTE` 的 INTRO/INTERLUDE/OUTRO 里 `descend`/`ascend` 项权重 |
 | 每首歌保证来一次 hero / 关掉保证 | `HERO_GUARANTEE`(True=必触发一次);触发窗口避头/避尾 `HERO_EDGE_HEAD`/`HERO_EDGE_TAIL` |
 | 保证之外的额外 hero 频率 | `HERO_PROB`(概率)、`HERO_COOLDOWN`(最小间隔秒) |
 | 一首歌最多几次 hero | `HERO_MAX_PER_SONG`(现 2:保证 1 + 额外 1);每段块最多一次由 `seg_idx`/`hero_seg` 保证 |
@@ -358,6 +368,12 @@ pc-service 侧(`server.py`):`set_director` 现在**总是 `_start_director()`(�
     `cx/cy`**(`HERO_FOLLOW_ALPHA`):滤掉阶跃/噪声不抖,又能跟上直播中人的轻微移动——**完全锁死不行**(人一动就对不准/出框),
     **逐帧硬跟也不行**(抖),低通跟随是唯一解。同理脸框高误检(占位图上测到 0.09)会把 z 换算甩到上限致阶段2 拉不回,
     已加 `HERO_FACEH_CLAMP` 钳位 + `HERO_PULL_RATIO` 保底后拉。
+18. **大疆机位(UVC)黑屏 ≠ 接错设备,多半是采集没出帧**:`content_cam3` 绑的就是 `OsmoAction6`、设备也正常枚举
+    (`get_input_properties_list_property_items` 里 enabled=True),但截图亮度全 0 = 无信号。病因是 OBS 抢设备的
+    时机比大疆真正开始推 UVC 帧早、或 USB 会话短暂掉了,源一直黑着占着设备却收不到画面。**先重激活源**
+    (`set_input_settings(active:False)` → sleep 1.2s → `active:True`,等价 OBS 里源属性确定一遍 / 停用再启用),
+    大疆会重新协商 UVC 会话,画面立刻回来(实测重激活后亮度 255)。救不回再往硬件查:大疆没进「USB 摄像头/Webcam」
+    模式(别停在传输/存储)、被别的 App 独占、USB 线/口。**教训:UVC 相机黑屏先重激活,别急着重接。**
 
 ---
 

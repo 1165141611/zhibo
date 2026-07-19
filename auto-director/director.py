@@ -317,8 +317,8 @@ def plan_cut(t, s, do_cut):
         if RT["active"] != "cam1":
             do_cut("cam1", "locked", s)
         return
-    if s == "PAUSE":                              # 暂停:回主机静止,不再切
-        if RT["active"] != "cam1":
+    if s == "PAUSE":                              # 暂停/没点歌:回主机待机,保持人脸跟随(loose follow)
+        if RT["active"] != "cam1" or RT["mv_kind"] != "follow":   # 不在主机 或 主机上没跑跟随镜 → 起一个 follow
             do_cut("cam1", "pause", s)
         return
     if not RT["force_cut"]:                        # 非"状态刚变"的强制切:按本镜停留时长
@@ -418,6 +418,17 @@ def apply_shot(preset, move, cam):
         RT["fdirty"] = True
         return
     mv = MOVES
+    if move in ("descend", "ascend"):      # cam3 广角组合运镜:z + cy 同步(前推下降 / 后退上升)+ 偶尔横移
+        p = mv[move]
+        cx0 = cx1 = 0.5
+        if random.random() < p["pan_prob"]:            # 随机是否横移 + 随机方向(环绕感)
+            d = p["pan_amp"] / 2.0
+            cx0, cx1 = (0.5 - d, 0.5 + d) if random.random() < 0.5 else (0.5 + d, 0.5 - d)
+        start = {"z": p["z_from"], "cx": cx0, "cy": p["cy_from"], "ax": 0.5, "ay": 0.5}
+        goal = {"z": p["z_to"], "cx": cx1, "cy": p["cy_to"], "ax": 0.5, "ay": 0.5}
+        RT["framing"] = start
+        start_move(move, goal, random.uniform(*p["dur"]), p["ease"])
+        return
     if target["z"] < mv["min_move_z"]:     # 运镜要放大留边距,否则被防黑边钳制看不出动
         target = dict(target)
         target["z"] = mv["min_move_z"]
@@ -552,7 +563,7 @@ def start_closeup(cam, preset, pan=False, still=False):
     RT["closeup"] = {"cam": cam, "t0": now_t(), "cx": fx, "cy": fy, "ax0": ax0, "ax1": ax1,
                      "z_start": z_start, "z_target": z_target, "dur": max(2.0, RT["hold"])}
     RT["mv_to"] = None                              # 停掉普通插值,交给 tick_closeup
-    RT["mv_kind"] = "trackpan" if pan else "closeup"
+    RT["mv_kind"] = "trackpan" if pan else ("follow" if still else "closeup")
     RT["framing"] = {"z": z_start, "cx": fx, "cy": fy, "ax": ax0, "ay": CLOSEUP_AY}
     RT["fdirty"] = True
 
@@ -876,9 +887,8 @@ def main():
             if RT["manual_active"]:                  # 刚从手动切回自动 → 复位让状态机立即重切
                 RT["manual_active"] = False
                 RT["force_cut"] = True
-            if RT["song"] is None:
-                continue
-            if args.demo and now_t() > RT["song"]["end"] + 2:   # 演示曲循环重播
+            # 自动模式待机:没点歌(song None)也不空转——进状态机会判 PAUSE,驱动 cam1 待机跟随(跟脸,同关闭自动模式)
+            if args.demo and RT["song"] and now_t() > RT["song"]["end"] + 2:   # 演示曲循环重播
                 RT["base_wall"] = time.monotonic()
                 reset_director()
                 last_state_print = None
