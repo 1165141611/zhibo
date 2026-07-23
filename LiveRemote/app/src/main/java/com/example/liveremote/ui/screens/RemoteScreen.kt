@@ -13,8 +13,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -31,7 +29,6 @@ import com.example.liveremote.ui.components.connColor
 import com.example.liveremote.ui.components.noRippleClick
 import com.example.liveremote.ui.theme.C
 import com.example.liveremote.ui.theme.F
-import kotlin.math.roundToInt
 
 // 声卡场景清单(演唱页 SingScreen 复用)。遥控页不再放场景按钮,场景切换在演唱页。
 val SCENES = listOf(1 to "聊天", 2 to "湿唱", 3 to "干唱", 4 to "喇叭", 5 to "闭麦")
@@ -41,8 +38,6 @@ fun RemoteScreen(
     st: AppState,
     host: String,
     onReset: () -> Unit,
-    onDirector: (Boolean) -> Unit,
-    onCamZoom: (Int) -> Unit,
     onStudio: () -> Unit,
     onPlayerWin: () -> Unit,
     onPitch: () -> Unit,
@@ -70,32 +65,6 @@ fun RemoteScreen(
         // 声卡场景:只留归位(场景切换在演唱页)
         SectionLabel("声卡场景", Modifier.padding(bottom = 12.dp))
         HoldToConfirmButton(label = "归位", hint = "(长按 2 秒归位)", onConfirm = onReset)
-
-        // 自动切镜运镜
-        SectionLabel("自动切镜运镜", Modifier.padding(top = 22.dp, bottom = 12.dp))
-        Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(C.Card).border(1.dp, C.Stroke, RoundedCornerShape(16.dp)),
-        ) {
-            Row(Modifier.fillMaxWidth().padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("自动切镜运镜", color = C.Text, fontSize = F.body)
-                WeightSpacer()
-                ToggleSwitch(st.directorOn) { onDirector(!st.directorOn) }
-            }
-            Box(Modifier.fillMaxWidth().height(1.dp).background(C.Stroke))
-            val zoomOn = !st.directorOn   // 自动切镜开启时,主镜放大禁用
-            val labelColor = if (zoomOn) C.Text else C.TextDim
-            Row(Modifier.fillMaxWidth().padding(start = 15.dp, end = 15.dp, top = 10.dp, bottom = 10.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                Text("主镜头放大", color = labelColor, fontSize = F.body)
-                Slider(
-                    value = st.camZoom.toFloat(), onValueChange = { onCamZoom(it.roundToInt()) },
-                    valueRange = 100f..250f, enabled = zoomOn,
-                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
-                    colors = SliderDefaults.colors(thumbColor = C.Accent, activeTrackColor = C.Accent, inactiveTrackColor = C.Stroke2),
-                )
-                Text(String.format("%.1fx", st.camZoom / 100f), color = labelColor, fontSize = F.pill, fontWeight = FontWeight.Bold)
-            }
-        }
 
         SectionLabel("窗口开关", Modifier.padding(top = 22.dp, bottom = 12.dp))
         Column(

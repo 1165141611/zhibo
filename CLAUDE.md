@@ -5,11 +5,13 @@
 
 ## 一、项目速览
 
-四个子项目,详见 [README.md](README.md)。一句话:
+三个子项目,详见 [README.md](README.md)。一句话:
 - `live-remote/` = PC 遥控服务(Python/FastAPI),已完成。
 - `LiveRemote/` = 安卓遥控 App(Kotlin),开发中。
 - `karaoke-player/` = 自制K歌播放器(Python/PySide6),单曲 Demo 已通。
-- `auto-director/` = 多机位数据驱动自动切镜/运镜(状态机+护栏),原型·模拟器阶段,拟接 OBS。
+
+> 注:早先的 `auto-director/`(多机位自动切镜/运镜,拟接 OBS)已于 2026-07-23 移除——回归直播伴侣直接推流、
+> 不再用 OBS/多机位。开播后叠加评论/礼物悬浮窗 + QQ音乐时,无线主摄卡成 PPT、音画不同步,遂弃用整条 OBS 链路。
 
 **整合大方案与路线图见 [KARAOKE_SYSTEM.md](KARAOKE_SYSTEM.md)** —— K歌播放器 + pc-service 中枢 + 手机全屏
 点歌台的目标架构、已定决策、分阶段路线。**做 K歌 相关大功能前先读它**,别被单次微调的上下文带偏。

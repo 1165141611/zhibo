@@ -100,7 +100,7 @@ def _load_chorus(song_dir):
 
 def song_karaoke(mid):
     """返回 {mid, lines, notes:[{start,dur,pitch0..1}], chorus:[[s,e]...]} 或 None(找不到 QRC)。
-    lines/notes 供手机演唱页;chorus 供自动切镜状态机(见 auto-director/)。"""
+    lines/notes 供手机演唱页;chorus 为副歌区间标注(原供已移除的自动切镜,现暂无消费方,保留字段)。"""
     if not mid:
         return None
     if mid in _CACHE:

@@ -63,7 +63,6 @@ import karaoke_data
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 
 import config
 
@@ -109,9 +108,6 @@ STATE = {
     "k_mid": "", "k_title": "", "k_artist": "",
     "now": None,               # 正在唱 {mid,title,artist} 或 None(空闲)
     "queue": [],               # 等待队列 [{mid,title,artist}...]
-    # ── 自动切镜(auto-director)──
-    "director_on": False,      # 自动切镜运镜开关(开→托管 director;关→回主机+可手动放大)
-    "cam_zoom": 100,           # 主镜头(cam1)数字放大档位 100~250(仅 director 关时可调,居中放大)
 }
 
 # ══════════════════════════════════════════════════════════
@@ -681,10 +677,6 @@ def _start_bgm_vol_poller():
 #  4) WebSocket 服务
 # ══════════════════════════════════════════════════════════
 app = FastAPI()
-# 允许跨源读接口(自动切镜模拟器 auto-director/ 独立打开时,跨源 fetch /song/{mid}/karaoke;
-# 只读接口,本就 LAN 内无鉴权工具,放开无碍。WS 握手不走 CORS,本就跨源可用)。
-app.add_middleware(CORSMiddleware, allow_origins=["*"],
-                   allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 _clients = set()
 _loop = None            # uvicorn 的事件循环(供子进程读取线程跨线程广播)
 _smtc_proc = None       # winrt 子进程
@@ -1014,15 +1006,6 @@ async def _handle_cmd(data):
         v = max(0, min(100, int(data.get("value"))))
         STATE["bgm_vol"] = v          # 乐观更新:滑条立即跟手
         schedule_qq_volume(v)         # 实际设音量丢到 pycaw 线程,合并高频拖动,不阻塞循环
-    elif cmd == "director":
-        set_director(bool(data.get("on")))    # 自动切镜开关
-    elif cmd == "cam_zoom":
-        v = max(100, min(250, int(data.get("value", 100))))
-        STATE["cam_zoom"] = v
-        # 放大由常驻 director 的手动主镜模式应用(带人脸跟随):cam_zoom 随本命令末尾的广播下发给 director。
-        # 仅在关闭自动切镜时可调(App 已禁用);确保 director 在跑(从没开过自动切镜也能直接拖滑块放大)。
-        if not STATE.get("director_on"):
-            _start_director()
     elif cmd == "ping":
         # 异步刷新一下音量读数(QQ音乐 可能刚开),不阻塞事件循环
         schedule_qq_volume_read()
@@ -1177,116 +1160,6 @@ def _player_reader(proc):
                 _threadsafe_broadcast()
     except Exception:
         pass
-
-
-# ══════════════════════════════════════════════════════════
-#  自动切镜(auto-director)托管 + 手动模式 OBS 控制
-# ══════════════════════════════════════════════════════════
-_obs_cl = None
-_director_proc = None
-
-
-def _obs():
-    """惰性拿 obs-websocket 客户端(断了重连)。OBS 没开则返回 None,调用方静默跳过。"""
-    global _obs_cl
-    if _obs_cl is not None:
-        try:
-            _obs_cl.get_version()
-            return _obs_cl
-        except Exception:
-            _obs_cl = None
-    try:
-        import obsws_python as obs
-        _obs_cl = obs.ReqClient(host=config.OBS_HOST, port=config.OBS_PORT,
-                                password=config.OBS_PASSWORD, timeout=4)
-        return _obs_cl
-    except Exception as e:
-        print(f"[OBS] 连接失败(OBS 没开?): {e}")
-        return None
-
-
-def _obs_cut_main():
-    cl = _obs()
-    if cl is None:
-        return
-    try:
-        cl.set_current_program_scene(config.MAIN_CAM_SCENE)
-    except Exception as e:
-        print(f"[OBS] 切主机失败: {e}")
-
-
-def _obs_zoom_main(pct):
-    """居中数字放大 cam1(cover 等比铺满 4:3 不变形)。pct=100 满画面,>100 放大(防黑边钳制)。"""
-    cl = _obs()
-    if cl is None:
-        return
-    try:
-        gv = cl.get_video_settings()
-        CW, CH = gv.base_width, gv.base_height
-        iid = cl.get_scene_item_id(config.MAIN_CAM_SCENE, config.MAIN_CAM_SOURCE).scene_item_id
-        tr = cl.get_scene_item_transform(config.MAIN_CAM_SCENE, iid).scene_item_transform
-        sw, sh = tr["sourceWidth"], tr["sourceHeight"]
-        if not sw or not sh:
-            return
-        z = max(1.0, pct / 100.0)
-        sc = max(CW / sw, CH / sh) * z
-        sws, shs = sw * sc, sh * sc
-        posX = min(0.0, max(CW - sws, 0.5 * CW - 0.5 * sws))
-        posY = min(0.0, max(CH - shs, 0.5 * CH - 0.5 * shs))
-        cl.set_scene_item_transform(config.MAIN_CAM_SCENE, iid, {
-            "boundsType": "OBS_BOUNDS_NONE",   # 清残留边界框(否则覆盖 scale 致黑边/变形)
-            "scaleX": float(sc), "scaleY": float(sc),
-            "positionX": float(posX), "positionY": float(posY),
-            "cropLeft": 0, "cropRight": 0, "cropTop": 0, "cropBottom": 0,
-            "rotation": 0.0, "alignment": 5})
-    except Exception as e:
-        print(f"[OBS] 缩放主机失败(cam1/content_cam1 存在吗?): {e}")
-
-
-def _start_director():
-    global _director_proc
-    if _director_proc is not None and _director_proc.poll() is None:
-        return                          # 已在跑
-    try:
-        # PYTHONIOENCODING/PYTHONUTF8:强制子进程 std 流用 UTF-8。否则 Windows 默认 GBK,director 的
-        # print("♪/→/中文") 会 UnicodeEncodeError 崩掉主循环(恰在第一次 [切] 打印,表现为"切一下就死")。
-        # 与 start_player 同一个坑。stderr 也走 DEVNULL,崩因看不到,故这里必须防患。
-        _env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
-        _director_proc = subprocess.Popen(
-            [config.PLAYER_PYTHON, "-u", config.DIRECTOR_PATH],
-            cwd=os.path.dirname(config.DIRECTOR_PATH),
-            creationflags=0x08000000,   # CREATE_NO_WINDOW
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=_env,
-        )
-        print("[DIRECTOR] 自动切镜已启动")
-    except Exception as e:
-        print(f"[DIRECTOR] 启动失败: {e}")
-
-
-def _stop_director():
-    global _director_proc
-    if _director_proc is not None:
-        try:
-            _director_proc.terminate()
-        except Exception:
-            pass
-        _director_proc = None
-        print("[DIRECTOR] 自动切镜已停止")
-
-
-def set_director(on):
-    """自动切镜开关 = director 的模式切换(director 常驻,不再启停进程):
-    开→自动编排;关→手动主镜(director 锁 cam1 + 人脸跟随 + 按 cam_zoom 放大)。
-    两种模式 cam1 都交给常驻 director,pc-service 只切一次场景做基线、不再自己变换 cam1。
-    director_on/cam_zoom 随 STATE 广播下发给 director(它是 WS 客户端,据此切模式/放大)。"""
-    STATE["director_on"] = bool(on)
-    _start_director()          # 常驻:确保 director 在跑(幂等);关闭时也要它跑来做手动跟随
-    _obs_cut_main()            # 即时基线:程序画面切到主机(变换/放大/跟随由 director 持续接管)
-
-
-import atexit as _atexit
-_atexit.register(_stop_director)        # pc-service 退出时尽量带走 director,别成孤儿进程
 
 
 def _resolve_player_device():

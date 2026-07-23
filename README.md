@@ -22,7 +22,6 @@
 | [`live-remote/`](live-remote/) | PC 后台遥控服务(声卡场景 + BGM 控制) | Python / FastAPI + WebSocket | [README](live-remote/README.md) · [DEV_LOG](live-remote/DEV_LOG.md) |
 | [`LiveRemote/`](LiveRemote/) | 安卓悬浮窗遥控 App(叠在 K歌 上) | Kotlin / Android Studio | [README](LiveRemote/README.md) |
 | [`karaoke-player/`](karaoke-player/) | 自制干净歌词/音高/伴奏播放器 | Python / PySide6 + sounddevice | [README](karaoke-player/README.md) |
-| [`auto-director/`](auto-director/) | 多机位自动切镜/运镜(数据驱动,原型·模拟器) | HTML/JS(状态机)→ 拟接 OBS | [README](auto-director/README.md) |
 
 > 命名坑:`live-remote`(小写,PC 服务)和 `LiveRemote`(驼峰,安卓 App)是两个不同项目,别搞混。
 

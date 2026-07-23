@@ -40,9 +40,6 @@ data class AppState(
     val pitchVisible: Boolean = true,   // 音准线显隐(遥控页开关,后端缓存)
     val setlistVisible: Boolean = true, // 顶端滚动歌单显隐(遥控页开关,后端缓存)
     val libCount: Int = 0,
-    // —— 自动切镜运镜 ——
-    val directorOn: Boolean = false,    // 自动切镜运镜开关(开→电脑托管 director;关→可手动放大主镜)
-    val camZoom: Int = 100,             // 主镜头(cam1)放大档位 100~250(仅关闭自动切镜时可调)
 ) {
     val keyLabel: String get() = when {
         key == 0 -> "原调"

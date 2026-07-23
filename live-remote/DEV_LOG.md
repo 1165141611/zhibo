@@ -690,3 +690,19 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
 - **App 无需改**(开关发 `director{on}`、滑块发 `cam_zoom{value 100~250}`、滑块 `enabled=!directorOn` 语义全吻合)。
   细节与参数(`manual` 配置组)见 `auto-director/GUIDE.md` §7 / "由 App/pc-service 开关"。**限制**:director 常驻后崩溃无 watchdog,重开开关即恢复。
     **需重启托盘服务生效。**
+
+## 十三、移除自动切镜/运镜 + OBS 整条链路(2026-07-23)
+**背景**:本地测试 OBS 尚可,但**真开播**后叠加评论/礼物透明悬浮窗 + QQ音乐,画面整体卡顿、音画不同步,
+**无线主摄卡成 PPT**。根因是开播即启动 x264 编码 + 推流,叠加透明窗 DWM/GPU 合成 + WiFi 上行推流与无线主摄
+收流互相争抢带宽、CPU 满载饿死摄像头解码线程。权衡后**放弃 OBS + 多机位 + 自动切镜/运镜,回归直播伴侣直接推流**。
+- **删除**:整个 `auto-director/` 子项目(director 状态机/护栏、`obs_setup.py`、`wire_camera.py`、模拟器、GUIDE)。
+- **pc-service**:去掉 `config.py` 的 `DIRECTOR_PATH/OBS_HOST/OBS_PORT/OBS_PASSWORD/MAIN_CAM_SCENE/MAIN_CAM_SOURCE`;
+  `server.py` 去掉 STATE 的 `director_on`/`cam_zoom`、`director`/`cam_zoom` 两条 WS 指令、整段 OBS/director 托管
+  (`_obs/_obs_cut_main/_obs_zoom_main/_start_director/_stop_director/set_director` + atexit + `obsws_python` 导入),
+  以及仅供模拟器跨源的 `CORSMiddleware`。**依赖 `obsws-python` 随子项目删除不再需要。**
+- **安卓 App**:遥控页移除「自动切镜运镜」开关 + 主镜放大滑块(`Models/RemoteViewModel/RemoteScreen/MainActivity`
+  的 `directorOn`/`camZoom` 全链),已 `assembleDebug` 重打包 + adb 装机。
+- **歌词不受影响**:K歌歌词本就走 `karaoke-player 绿幕窗 → 直播伴侣窗口捕获 + 绿幕抠图`,不经 OBS。
+  回直播伴侣后在其中把播放器绿幕窗加成「窗口捕获」素材、设绿幕色键即可(原 `ktv-overlay` skill 的 OBS 版已随之删除)。
+- **`chorus` 字段**:原供自动切镜状态机,现暂无消费方,`meta.json`/`karaoke_data` 仍保留字段不动。
+    **需重启托盘服务生效。**

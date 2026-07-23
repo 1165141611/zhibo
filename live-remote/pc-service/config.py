@@ -76,14 +76,6 @@ PLAYER_DEVICE_NAME    = "PLAYBACK 1/2"   # ROUTIST R2 的伴奏/BGM 路由
 PLAYER_DEVICE_HOSTAPI = "WASAPI"
 PLAYER_TITLE  = "KaraokePlayer"    # 播放器窗口标题(player.py 里写死),karaoke_win 靠它找 hwnd
 
-# ── 自动切镜(auto-director)托管 + 手动模式 OBS 控制 ──────────────
-DIRECTOR_PATH  = _os.path.abspath(_os.path.join(BASE_DIR, "..", "..", "auto-director", "director.py"))
-OBS_HOST       = "localhost"
-OBS_PORT       = 4455
-OBS_PASSWORD   = ""                # OBS 工具→WebSocket 服务器设置;关了身份验证就留空
-MAIN_CAM_SCENE = "cam1"            # 主机位场景(director 关时切它)
-MAIN_CAM_SOURCE = "content_cam1"   # 主机位摄像头源(director 关时对它数字放大)
-
 # ── 自动曲库导入器 ────────────────────────────────────
 # 监听 WeSing 缓存(LRU 只留最近几首),把唱过的歌四件套拷进永久曲库,防被清掉。
 WESING_RES_DIR        = r"D:\WeSingCache\WeSingDL\Res"
