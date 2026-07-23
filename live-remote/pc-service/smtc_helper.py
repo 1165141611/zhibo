@@ -10,8 +10,9 @@ stdout 协议(父进程读):
   - 以 `#` 开头的行是诊断日志(父进程只写进 server.log,不解析)。
 stdin 协议(父进程写):每行一个指令 play / pause / next / prev / toggle。
 
-winrt 全在**主线程单事件循环**上跑(asyncio.run);stdin 线程只做 IO 塞队列、绝不碰 winrt,
-避免跨线程/跨套间的 COM 问题。
+winrt 全在**主线程单个常驻事件循环**上跑(`loop.run_until_complete`,**绝不每帧 asyncio.run 新建/销毁**
+——那会让 winrt 线程池膨胀到数百线程反复 churn,拖垮系统调度器致全桌面卡顿);MediaManager 也**缓存复用**,
+不每帧 request_async。stdin 线程只做 IO 塞队列、绝不碰 winrt,避免跨线程/跨套间的 COM 问题。
 """
 import sys
 import os
@@ -61,9 +62,28 @@ def main():
         pass
     threading.Thread(target=_stdin_reader, daemon=True).start()
 
+    # ★ 单个常驻事件循环(绝不每帧 asyncio.run 新建/销毁):asyncio.run 每调一次都建拆一个事件循环,
+    #   配合每帧 request_async 会让 winrt 线程池膨胀到数百线程反复 churn,拖垮系统调度器 → 全桌面卡。
+    #   现全程复用这一个 loop + 缓存的 MediaManager。
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    _mgr = [None]   # 缓存的 SMTC 会话管理器(request 一次,长期复用;失败置 None 下轮重取)
+
+    def _run(coro):
+        return loop.run_until_complete(coro)
+
+    def _ensure_mgr():
+        if _mgr[0] is None:
+            try:
+                _mgr[0] = _run(smtc.get_manager())
+            except Exception:
+                _mgr[0] = None
+        return _mgr[0]
+
     # 启动时把所有会话 AUMID 打进 server.log,方便作者确认 QQMUSIC_SMTC_HINT 是否匹配得上
     try:
-        aumids = asyncio.run(smtc.list_aumids())
+        aumids = _run(smtc.list_aumids())
         _emit("#SMTC 媒体会话 AUMID: " + json.dumps(aumids, ensure_ascii=False))
     except Exception:
         pass
@@ -79,9 +99,10 @@ def main():
                 cmd = _cmd_q.get_nowait()
                 drained = True
                 try:
-                    asyncio.run(smtc.control(cmd))
+                    if _ensure_mgr() is not None:
+                        _run(smtc.control(_mgr[0], cmd))
                 except Exception:
-                    pass
+                    _mgr[0] = None   # 管理器可能失效,下轮重取
         except queue.Empty:
             pass
 
@@ -91,10 +112,13 @@ def main():
         now = time.monotonic()
         if drained or now - last_snap_at >= 0.35:
             last_snap_at = now
+            snap = None
             try:
-                snap = asyncio.run(smtc.snapshot())
+                if _ensure_mgr() is not None:
+                    snap = _run(smtc.snapshot(_mgr[0]))
             except Exception:
                 snap = None
+                _mgr[0] = None
             key = (snap.get("bgm_title"), snap.get("bgm_playing")) if snap else (None, None)
             # 歌名/播放态变了 → 立即发;否则每 1s 无条件重发一帧(含 pos + 心跳,防管道断成孤儿)
             if drained or key != last_key or now - last_full_emit_at >= 1.0:

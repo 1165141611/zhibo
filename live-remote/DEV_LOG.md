@@ -744,3 +744,20 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
 - **验证**:`scratchpad/enqueue_smoke.py` 走 enqueue→bump_play→_on_lib_change→_push_setlist 全路径(不触发真实
   播放、不进直播链路):连续入队 3 首队列正确增长、`k_playing=False` 无音频、清空还原、pc-service+播放器均存活不崩。
     **需重启托盘服务生效(播放器由服务托管,重启服务即换新播放器代码)。**
+
+## 十六、SMTC winrt 子进程线程爆炸致"全系统 UI 卡顿"根治(2026-07-23)
+**症状**:电脑有时整体很卡——桌面右键菜单要等一会才出、切换应用卡、各种 UI 变慢,但**CPU/内存看着都充足**;
+**停掉 pc-service 就恢复**。**排查**:用 `GetGuiResources` 逐进程测 GDI/USER/句柄/线程(`scratchpad/gdi_probe.ps1`):
+先排除 `refresh_tray`——狂发 300 次入队触发 `update_menu`,pc-service GDI/USER/句柄纹丝不动(147/59/846),托盘菜单不漏。
+真凶在 **winrt/smtc 子进程:线程数 420~472 剧烈 churn**(反复创建/销毁)、句柄 ~1250。**根因**:`smtc_helper.py`
+**每 0.35s 一次 `asyncio.run()`**(新建/销毁事件循环)+ **每帧 `MediaManager.request_async()`**(重新枚举整个 SMTC
+基础设施),winrt 异步完成回调在 Windows 线程池起线程,30 分钟跑了 ~5000 次 → 线程池膨胀到数百线程反复 churn →
+**拖垮内核线程管理器/调度器 → 全桌面 UI 卡**(线程创建是内核开销+上下文切换,用户态 CPU% 却不高)。停 pc-service
+=带走子进程=thrash 停=恢复,与症状完全吻合。
+- **修**:①`smtc_helper.py` 改用**单个常驻事件循环**(`loop=new_event_loop()` + `loop.run_until_complete`,
+  **绝不每帧 asyncio.run**);②**缓存 MediaManager 复用**(`smtc.get_manager()` 请求一次,`snapshot(mgr)`/
+  `control(mgr,action)` 收缓存 mgr,不再每帧 request_async;失败置 None 下轮重取)。
+- **验证(修复后 90s 趋势)**:winrt 线程 **450→10~14 稳定**(↓97%)、句柄 ~1250→~200 稳定、USER 32~65→2~5;
+  且 SMTC 功能完好:`bgm_title/bgm_playing` 正确、`bgm_pos` 实时推进。**这条是整机卡顿的真凶,前述都只是局部。**
+- 附:全局定时器分辨率被压到 1ms,是播放器音频(PortAudio 低延迟)正常需求,非本问题,保持不动。
+    **需重启托盘服务生效。**

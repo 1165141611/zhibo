@@ -89,10 +89,16 @@ async def list_aumids():
         return []
 
 
-async def snapshot():
-    """返回 QQ音乐 会话快照 dict,无会话返回 None。"""
+async def get_manager():
+    """请求一次 SMTC 会话管理器。**由调用方(smtc_helper)缓存复用**——绝不能每帧 request_async:
+    它会重新枚举整个 SMTC 基础设施,配合每帧新建 asyncio 事件循环,会让 winrt 线程池膨胀到数百线程、
+    反复 churn,拖垮系统调度器 → 全桌面 UI 卡顿(用户态 CPU 却不高)。见 smtc_helper 的常驻循环。"""
+    return await MediaManager.request_async()
+
+
+async def snapshot(mgr):
+    """返回 QQ音乐 会话快照 dict,无会话返回 None。mgr 由调用方缓存复用(不要每帧 request_async)。"""
     try:
-        mgr = await MediaManager.request_async()
         s = await _qq_session(mgr)
         if s is None:
             return None
@@ -123,10 +129,10 @@ async def snapshot():
         return None
 
 
-async def control(action):
-    """对 QQ音乐 会话做有方向的传输控制(play/pause/next/prev/toggle)。返回是否成功下发。"""
+async def control(mgr, action):
+    """对 QQ音乐 会话做有方向的传输控制(play/pause/next/prev/toggle)。返回是否成功下发。
+    mgr 由调用方缓存复用(不要每次 request_async)。"""
     try:
-        mgr = await MediaManager.request_async()
         s = await _qq_session(mgr)
         if s is None:
             return False
