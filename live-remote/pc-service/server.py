@@ -851,8 +851,16 @@ async def _bgm_apply(target):
     **正在渐变时绝不丢弃后续指令**:只更新期望 _bgm_desired,当前渐变收尾后自动续到最新期望
     ——治老代码"_fading 期间直接 return 把用户后续点击全丢"导致的"暂停后连点播放没反应、
     几秒后又自动回到暂停"(那几秒是老的 ~6s 慢渐变 + 丢指令 + SMTC 抑制窗过期后把真实态翻回)。"""
-    global _fading, _bgm_desired
+    global _fading, _bgm_desired, _bgm_smtc_mute_until
     _bgm_desired = target
+    # ★ 抑制窗必须**在事件循环线程同步设好**(早于把渐变丢进 pycaw 执行器):_pycaw_exec 是单线程
+    #   (max_workers=1),被 _reassert_bgm_vol(自动切歌占 1.8s)/音量泵/回读占着时,_bgm_fade_impl
+    #   要排队,若抑制窗留到它里面才设,这段排队延迟内 winrt 每 0.35~1s 推来的真实 bgm_playing 快照
+    #   会把刚乐观翻转的 STATE["bgm_playing"] 冲回去并广播 → 手机按钮"按了2s又弹回"、要点好几次。
+    #   在此同步设窗,快照处理时窗已生效,乐观态不再被冲。用 max 不缩短已有更长的窗。渐变真正开跑时
+    #   _bgm_fade_impl 会再按"实际起点"续设(覆盖排队更久的极端情况)。
+    _bgm_smtc_mute_until = max(_bgm_smtc_mute_until,
+                              time.monotonic() + config.FADE_SECONDS + (6.0 if target else 4.0))
     if STATE.get("bgm_playing") != target:
         STATE["bgm_playing"] = target
         await _broadcast()

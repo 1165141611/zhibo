@@ -63,7 +63,9 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     private var seekLockUntil = 0L
     private var playLockUntil = 0L
     private var volLockUntil = 0L
+    private var bgmPlayingLockUntil = 0L   // BGM 播放态乐观锁:发指令后短暂以本地为准,不被服务端回推冲刷
     private val OPT_LOCK_MS = 1200L
+    private val BGM_LOCK_MS = 2500L        // BGM 渐变比 K歌 playpause 慢,锁久一点(覆盖服务端渐变+落地)
     private fun now() = System.currentTimeMillis()
 
     // 刚连上(含断线重连)时,以**后端**的演唱音量为准:把手机媒体音量设成后端值(后端有持久缓存)。
@@ -137,7 +139,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             queue = queue,
             // scene=null(服务端归位后)→ 0=全部未选中;缺字段才保留旧值
             scene = if (!j.has("scene")) old.scene else if (j.isNull("scene")) 0 else j.optInt("scene"),
-            bgmPlaying = j.optBoolean("bgm_playing", old.bgmPlaying),
+            bgmPlaying = if (now() < bgmPlayingLockUntil) old.bgmPlaying else j.optBoolean("bgm_playing", old.bgmPlaying),
             bgmVol = if (j.has("bgm_vol") && !j.isNull("bgm_vol")) j.optInt("bgm_vol") else old.bgmVol,
             bgmTitle = j.optString("bgm_title", old.bgmTitle),
             bgmArtist = j.optString("bgm_artist", old.bgmArtist),
@@ -211,18 +213,22 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         if (singing) {
             val resumePending = bgmResumeJob?.isActive == true
             bgmResumeJob?.cancel(); bgmResumeJob = null
-            if (s.bgmPlaying) {
-                client.send("cmd" to "bgm", "action" to "pause")
-                autoPausedByUs = true
-                toast("开始演唱 · 已暂停背景音乐")
-            } else if (resumePending) {
-                // 缓冲期内又开唱:BGM 还没来得及恢复,保持"是我们暂停的"记账即可
-                autoPausedByUs = true
-            }
+            // 曾在播 / 正待恢复 → 记账"是我们暂停的"(停唱后要恢复);纯用户手动暂停的不记,免得替他恢复。
+            if (s.bgmPlaying || resumePending) autoPausedByUs = true
+            // ★ 开唱**无条件**发有方向暂停(服务端幂等):即便本地以为已暂停,也可能有一条"刚与开唱擦肩、
+            //   已发出的恢复 play"在途,统一压掉最稳,根治"唱着唱着 BGM 自己响"。乐观锁定按钮态不被回推冲刷。
+            bgmPlayingLockUntil = now() + BGM_LOCK_MS
+            _state.value = _state.value.copy(bgmPlaying = false)
+            client.send("cmd" to "bgm", "action" to "pause")
+            if (s.bgmPlaying) toast("开始演唱 · 已暂停背景音乐")
         } else {
             if (autoPausedByUs) {
                 bgmResumeJob = viewModelScope.launch {
                     delay(2000)                       // 衔接缓冲:停唱 2 秒后 BGM 才渐入
+                    // 恢复前二次确认没重新开唱(防 delay 结束与开唱擦肩、cancel 没拦住 → BGM 盖过演唱)
+                    if (_state.value.hasSong && _state.value.playing) return@launch
+                    bgmPlayingLockUntil = now() + BGM_LOCK_MS
+                    _state.value = _state.value.copy(bgmPlaying = true)
                     client.send("cmd" to "bgm", "action" to "play")
                     autoPausedByUs = false
                     toast("演唱停止 · 已恢复背景音乐")
@@ -298,7 +304,12 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         // 联动的自动暂停/恢复下个演唱周期照常工作,不会被手动操作永久打断。
         bgmResumeJob?.cancel(); bgmResumeJob = null
         autoPausedByUs = false
-        client.send("cmd" to "bgm", "action" to "playpause")
+        // 有方向(play/pause)而非无方向 playpause:方向由本地意图决定,不依赖可能被回推冲错的状态,
+        // 杜绝"显示错→再点反着来"。同时乐观锁定按钮态,不被服务端过渡期回推翻回去。
+        val desired = !_state.value.bgmPlaying
+        bgmPlayingLockUntil = now() + BGM_LOCK_MS
+        _state.value = _state.value.copy(bgmPlaying = desired)
+        client.send("cmd" to "bgm", "action" to if (desired) "play" else "pause")
     }
     fun setVolume(v: Int) {
         _state.value = _state.value.copy(bgmVol = v)

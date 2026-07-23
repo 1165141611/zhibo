@@ -706,3 +706,25 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
   回直播伴侣后在其中把播放器绿幕窗加成「窗口捕获」素材、设绿幕色键即可(原 `ktv-overlay` skill 的 OBS 版已随之删除)。
 - **`chorus` 字段**:原供自动切镜状态机,现暂无消费方,`meta.json`/`karaoke_data` 仍保留字段不动。
     **需重启托盘服务生效。**
+
+## 十四、BGM 手机控制"按了又弹回/反复点/唱着自动响"根治(2026-07-23)
+**症状**(直播现场):手机点播放伴奏→按钮显示播放,~2s 后无反应又弹回暂停,反复点好几次才真播;暂停也常要点
+多次;唱着唱着 BGM 自己响起来。**根因三层叠加**:
+1. **服务端 SMTC 抑制窗设得太晚**(主因)。`_pycaw_exec` 是 `max_workers=1` **单线程**,渐变/音量泵/回读/
+   `_reassert_bgm_vol`(自动切歌占 **1.8s**)全串在这一条线程。而防"winrt 快照冲掉乐观 `bgm_playing`"的抑制窗
+   `_bgm_smtc_mute_until` 原本在 `_bgm_fade_impl`(executor 线程)里才设——线程被占时渐变排队延迟,这段延迟内
+   winrt 每 0.35~1s 推来的**真实** `bgm_playing`(此刻 QQ 还没起播=False)就把刚乐观翻转的 STATE 冲回去并广播。
+   **修**:抑制窗改到 `_bgm_apply`(事件循环线程)**同步设好**,早于把渐变丢进 executor;`max(...)` 不缩短、
+   渐变真开跑时 `_bgm_fade_impl` 再按实际起点续设。
+2. **App 端 `bgmPlaying` 无乐观锁**。`playing`(K歌)有 `playLockUntil`,`bgmPlaying` 却直接采信每次回推 →
+   任何过渡期的错误广播立即翻按钮。**修**:加 `bgmPlayingLockUntil`(`BGM_LOCK_MS=2500`),发指令后短暂以本地为准。
+3. **手动按钮走无方向 `playpause` + 联动恢复擦肩**。`playpause` 方向依赖可能已被冲错的状态→再点就反着来;
+   联动"停唱 2s 后恢复"的协程与"重新开唱"擦肩时 cancel 拦不住已发出的 `play`→BGM 盖过演唱。**修**:
+   `bgmToggle` 改发**有方向** `play`/`pause`(方向由本地意图定);联动开唱**无条件**发幂等 `pause`(盖过在途恢复)、
+   恢复前**二次确认没重新开唱**再发 `play`。
+- **改动**:`server.py` `_bgm_apply`(同步设窗);`RemoteViewModel.kt` `bgmToggle`/`interlockBgm`/回推 reconcile +
+  新增 `bgmPlayingLockUntil`。已重启 pc-service + `assembleDebug` 装机。
+- **压测验证**(`scratchpad/bgm_*.py`,QQ音乐在跑真链路):急躁连点最终态跟手、间隔发 0 flap、**混乱场景**
+  (连续拖音量 + 穿插切歌占 pycaw 线程 + play/pause)最终态跟手、**0 长时间错误态**;尤其"play 落在 next 切歌
+  (占线程)期间"状态稳稳保持不翻——正是同步抑制窗生效点。
+    **需重启托盘服务生效。**
