@@ -161,6 +161,11 @@
   **显示时钟补偿**,否则歌词高亮会提前 ~180ms。`sys.setswitchinterval(0.002)` 减小 GIL 抖动。
   代价:切调/seek 到听见约多 0.15s,可接受。验证:无声数值测试(回调间隔/xrun/帧耗时),
   缓冲 183ms vs 最坏回调间隔 133ms,余量充足。
+- **冗余的顶端歌单重推别触发 pixmap 重建**(2026-07-23 修"点新歌入队时正在唱的歌卡顿一下"):同族 GIL 问题。
+  pc-service 每次"点歌入队"会因 `bump_play` 触发曲库回调 → **无条件重推 `setlist`**(内容其实没变,只是点歌次数变了)。
+  原 `set_setlist` 每次都 `_setlist_pix=None` **强制重建滚动歌单 pixmap**(字体渲染,GUI 线程重活)→ 抢 GIL
+  饿死 WSOLA 生产者线程 → 音频欠载卡顿。修:`set_setlist` **内容不变直接 return**(不重建);pc-service 侧
+  `_push_setlist` 也加去重缓存、仅播放器拉起时 `force=True` 强推。双保险。
 - **GUI 线程绝不做整段 PCM 解码等重活**(2026-07-13 修):`set_vocal` 首次切原唱要解码整段 kongsinger
   PCM,原来在 GUI 线程同步跑,连点"音源"就把窗口冻死。现放**后台线程**加载,完成后 `engine.swap_buffer`
   (引擎自带锁,跨线程安全),`_loading_vocal` 防重入。60fps 重绘加 `isVisible()` 守卫,隐藏态不排绘制。

@@ -728,3 +728,19 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
   (连续拖音量 + 穿插切歌占 pycaw 线程 + play/pause)最终态跟手、**0 长时间错误态**;尤其"play 落在 next 切歌
   (占线程)期间"状态稳稳保持不翻——正是同步抑制窗生效点。
     **需重启托盘服务生效。**
+
+## 十五、点歌入队致"正在唱的歌卡顿一下"根治(2026-07-23)
+**症状**:手机点新歌入队时,**正在演唱的歌**卡顿一下。**根因(跨进程 GIL 饿死)**:入队 `k_enqueue`→
+`library.bump_play`(点歌次数+1)→ `_on_lib_change` 回调 → **`_push_setlist()` 无条件重推顶端滚动歌单**给播放器。
+但入队并没改歌单内容(只是 `plays` 变了触发了曲库回调),播放器 `set_setlist` 却每次都 `_setlist_pix=None`
+**强制重建滚动 pixmap**(QFontMetrics/QPainter 字体渲染,GUI 线程重活)。播放器是单进程:GUI 线程重建时
+**持有 GIL** → 饿死 WSOLA 音频**生产者线程** → 音频队列排空 → 回调 `outdata[take:]=0` 输出静音(blocksize
+缓冲仅 ~160ms,GUI 停顿超过就断音)→ **正在播的歌卡顿**。
+- **修(双保险)**:
+  ① **播放器 `audio_engine`/`player.py`**:`set_setlist(titles)` **内容不变直接 return**,不重置 `_setlist_pix`
+     → 不触发重建。这是根治点(挡住一切冗余重推)。
+  ② **服务端 `server.py`**:`_push_setlist()` 加 `_last_setlist_pushed` 去重缓存,内容没变不发 IPC;
+     `start_player` 里改 `_push_setlist(force=True)` 强推,确保播放器(重)拉起时必收到完整歌单。
+- **验证**:`scratchpad/enqueue_smoke.py` 走 enqueue→bump_play→_on_lib_change→_push_setlist 全路径(不触发真实
+  播放、不进直播链路):连续入队 3 首队列正确增长、`k_playing=False` 无音频、清空还原、pc-service+播放器均存活不崩。
+    **需重启托盘服务生效(播放器由服务托管,重启服务即换新播放器代码)。**

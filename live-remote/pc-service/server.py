@@ -1223,7 +1223,7 @@ def start_player():
         if STATE.get("player_x") is not None and STATE.get("player_y") is not None:
             _player_send("pos %d %d" % (int(STATE["player_x"]), int(STATE["player_y"])))  # 恢复上次窗口位置
         _player_send("performer " + str(STATE.get("performer", "八门官上")))   # 演唱者(开头标题卡)
-        _push_setlist()          # 歌单内容(据缓存的 mid 列表 → 歌名)
+        _push_setlist(force=True)   # 歌单内容(据缓存的 mid 列表 → 歌名);拉起必推,绕过去重缓存
         print("[PLAYER] 已拉起 K歌播放器(隐藏)")
     except Exception as e:
         print(f"[PLAYER] 启动失败: {e}")
@@ -1338,13 +1338,23 @@ def _build_edit_form(container, mid, on_saved):
     container.after(100, lambda: (e_t.focus_set(),))
 
 
-def _push_setlist():
-    """把歌单(mid→歌名)推给播放器顶端滚动字幕。曲库勾选变化 / 播放器拉起时调。"""
+_last_setlist_pushed = None   # 上次已推给播放器的歌单(去重用)
+
+
+def _push_setlist(force=False):
+    """把歌单(mid→歌名)推给播放器顶端滚动字幕。曲库勾选变化 / 播放器拉起时调。
+    ★ 内容没变则跳过(force=True 强推,仅播放器拉起时用):否则每次"点歌入队"触发曲库回调
+    (bump_play→_on_lib_change)都会重推同样内容,播放器白白重建滚动 pixmap(GUI 线程字体渲染)、
+    与音频回调抢 GIL → 正在播的歌卡顿一下。播放器侧也有同样守卫,双保险。"""
+    global _last_setlist_pushed
     titles = []
     for m in STATE.get("setlist", []):
         t = (library.song_meta(m) or {}).get("title", "").strip()
         if t:
             titles.append(t)
+    if not force and titles == _last_setlist_pushed:
+        return
+    _last_setlist_pushed = titles
     _player_send("setlist " + json.dumps(titles, ensure_ascii=False))
 
 

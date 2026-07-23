@@ -276,8 +276,14 @@ class KaraokeWindow(QtWidgets.QWidget):
         p.restore()
 
     def set_setlist(self, titles):
-        self.setlist_titles = [str(t) for t in titles]
-        self._setlist_pix = None            # 重建
+        new = [str(t) for t in titles]
+        if new == self.setlist_titles:
+            return                          # ★ 内容没变就别动:重置 _setlist_pix 会让下一帧在 GUI 线程
+                                            #   重建滚动 pixmap(字体渲染重活),与音频回调抢 GIL → 正在播的
+                                            #   歌卡顿一下。pc-service 每次"点歌入队"都会重推一次歌单(内容
+                                            #   其实没变,只是 plays 次数变了触发了曲库回调),故必须在此挡掉。
+        self.setlist_titles = new
+        self._setlist_pix = None            # 内容变了才重建
 
     def _move_setlist(self, d):
         """Ctrl+↑↓ 移歌单:上不越窗顶(0),下不覆盖音轨(音准带顶)。"""
