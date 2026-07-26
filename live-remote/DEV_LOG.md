@@ -761,3 +761,53 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
   且 SMTC 功能完好:`bgm_title/bgm_playing` 正确、`bgm_pos` 实时推进。**这条是整机卡顿的真凶,前述都只是局部。**
 - 附:全局定时器分辨率被压到 1ms,是播放器音频(PortAudio 低延迟)正常需求,非本问题,保持不动。
     **需重启托盘服务生效。**
+## 十七、手机版全民K歌接入 + 曲库导入改「扫描窗口」(2026-07-26)
+
+**背景**:PC 版 WeSing 对用户自传/部分歌**下不了伴奏**;手机版能下。破解手机资源并接入,补齐曲库来源。
+
+**手机资源(`/sdcard/Android/data/com.tencent.karaoke/files/`,adb 可读、模拟器免 root)**:
+- `qrc/<songmid>_original.qrc` 逐字歌词、`note/<songmid>.oke` 音高——与 PC 版**同一条 hex→3DES(QRC_KEY)→zlib**
+  解密链(`assets._qrc_decrypt` 直接吃;`assets.load_notes` 已能识别 `.oke`/hex 自动解密)。
+- `obbligato/<filemid>.tkm` 伴奏/原唱——**QQ音乐 QMCv1 静态密钥加密的 M4A**。破解:`mask128[i]=KEY256[(i²+27)&0xff]`,
+  keystream=`mask128*256`(前 32768B)再按 0x7FFF 环绕(`startblk=firstblk+firstblk[1:-1]`=65534B、
+  `commonblk=firstblk[:-1]`=32767B 循环),明文=密文 XOR keystream → 标准 M4A,ffmpeg(imageio-ffmpeg)解码。
+  **KEY256 与 PC 伴奏 PCM 的 XOR 静态密钥(`wesing_pcm_key.PCM_XOR_KEY`)是同一张 256 字节表**,只是用法不同
+  (PC=直接 256 周期 XOR;手机=二次索引 mask128)。即 unlock-music/libtakiyasha 支持的 `.tkm`,查开源即得,不必自研。
+  > 密文分析时"周期128、非简单XOR"的假象正是 `(i²+27)%256` 二次索引所致;头 `c3 4a d6 ca 90 67 f7 52`=mask128 头,
+  > 与 m4a `ftyp` crib 反推逐字节吻合。曾一度想上 frida 动态 dump,查开源后发现是已知格式,直接静态解。
+
+**新增/改动**:
+- `karaoke-player/mobile_convert.py`(子进程 CLI):手机三件套 → PC 四件套。**伴奏/原唱自动判**——按 `.note` 音符
+  时间轴算两条 tkm 的"中置声道能量(音符段/间奏段)比",**比值小的=伴奏**(消了中置人声;实测伴奏 0.49 vs 原唱 1.0)。
+- `live-remote/pc-service/mobile_import.py`:`list_devices`(adb devices)、`scan_phone`(adb `stat` 列 mtime →
+  **song↔tkm mtime 就近配对**:每条 tkm 归属 mtime 最近的 qrc 所属歌;只缓存歌词没下伴奏的歌自动跳过,**不误抢邻曲 tkm**
+  → adb pull → 调 mobile_convert 子进程 → 候选)。
+- `library.py` **去后台轮询**:`scan_pc()` 列 PC 新歌候选、`import_candidate(cand,title,artist,swap)` 只入勾选项
+  (源目录由候选定、用户编辑歌名/歌手覆盖并置 `named=True`、`swap` 对调伴奏/原唱)。`start()` 只载清单 + 跑一次 `_remigrate`。
+- `server.py` **托盘「扫描导入歌曲」→ `_open_scan_window()`**(自带线程 + 自建 Tk 根,仿 `_open_library_browser`):
+  adb 设备下拉(默认第一台)+ 连接状态;打开即双端扫描,worker 线程跑、`root.after` 轮询刷 `ttk.Progressbar` loading;
+  **边扫边显示**——`scan_phone(on_candidate=...)` 每转好一首回调即入 `st["results"]`,`_poll`/`_render_new` 每 150ms
+  只追加新行(`range(len(rows), len(results))`),不等全部转完;行是**多选可编辑表格**(☑ + 歌名/原唱 Entry + 来源 +
+  手机源「伴奏⇄原唱」交换按钮);确认(扫完启用)只入勾选、`_on_lib_change` 刷。
+- `config.py` 加 `ADB_PATH`/`MOBILE_FILES`/`MOBILE_STAGING_DIR`/`MOBILE_CONVERT_PATH`/`MOBILE_TKM_WINDOW`。
+- **每行「▶ 试听」预览**(2026-07-26 追加):`server._preview(cand)` 子进程拉起
+  `karaoke-player/preview_play.py <src_root> <mid>`——sounddevice **系统默认输出**(自己听的通道,不进直播链路)
+  播伴奏(音量 `config.PREVIEW_VOLUME=0.4` 压低)+ Tk 纯文本歌词窗(当前行高亮、`←/→` 步退进 5s、`Esc` 退出);
+  单实例(再点/换歌先 terminate 旧的)。因音频已在扫描时转成四件套,试听只是播已存在文件、不重转。
+  **伴奏/原唱自动判别可靠(note 中置能量比),已去掉交换按钮**(结构固定,确认一次即准;万一判错用试听即可发现)。
+- **"列表顶部滚轮上滚露白"根治**(Canvas 自定义滚动 bug):当**内容比视口短**(行少,常见)时,滚轮上滚
+  `canvas.yview_scroll(-1,"units")` 会把短内容**往下推**、顶部露出一截空白,且 `yview` 报 `(0,1)` 不回夹
+  (实测 `canvasy(0)` 被推到 -150)。内容比视口高时正常夹在 0。**修**:滚轮处理器加判——
+  `inner.winfo_height() <= canvas.winfo_height()` 就 `yview_moveto(0)` 锁顶不滚,超出才滚。
+  **扫描窗 + 曲库管理窗同一模式,两处都修**。
+- **顺带小改进**:空标题(`needs_name`,KTV/自传版 `[ti:]` 清洗后为空)歌名框填灰红占位「（待命名,点此输入)」
+  (`_TITLE_PH`,聚焦即清;`_row_title` 导入时把没动过的占位视为空,仍走 needs_name 可后续改名);
+  `_qrc_meta` 把字面量歌手 `None`/`null` 也清成空。
+- **无线 ADB 扫码连接**(扫描窗口「📶 扫码连接」):`mobile_import.make_pair_payload()` 生成
+  `WIFI:T:ADB;S:studio-<hex>;P:<6位码>;;`,`server._open_pair_dialog` 用 `qrcode` 渲染二维码;手机『无线调试→
+  用二维码配对设备』扫码后广播 `_adb-tls-pairing._tcp`,`wait_and_pair()` 轮询 `adb mdns services` 发现→`adb pair`
+  →找 `_adb-tls-connect`→`adb connect`,成功刷新设备下拉选中新机并重扫。依赖 `qrcode`(pillow 已有)。
+
+**验证**:`mobile_convert` 转「不由自主」→ `assets.Song` 断言 29 行/228 音符/伴奏 292.1s、accompany 中置能量比 0.494(=伴奏);
+`scan_pc`+`import_candidate`(改名/去重/swap)隔离测通;`mobile_import.scan_phone` 真机(emulator-5554)跑通,家乡(只缓存歌词)
+正确跳过;扫描窗口构建/渲染/poll 无异常。**改动需重启 pc-service 生效。**

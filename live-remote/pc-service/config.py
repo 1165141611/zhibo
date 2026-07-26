@@ -76,10 +76,19 @@ PLAYER_DEVICE_NAME    = "PLAYBACK 1/2"   # ROUTIST R2 的伴奏/BGM 路由
 PLAYER_DEVICE_HOSTAPI = "WASAPI"
 PLAYER_TITLE  = "KaraokePlayer"    # 播放器窗口标题(player.py 里写死),karaoke_win 靠它找 hwnd
 
-# ── 自动曲库导入器 ────────────────────────────────────
-# 监听 WeSing 缓存(LRU 只留最近几首),把唱过的歌四件套拷进永久曲库,防被清掉。
+# ── 曲库导入(手动扫描窗口触发,不再后台轮询)────────────────
+# PC 版 WeSing 缓存(LRU 只留最近几首)+ 手机版全民K歌(adb 拉取解密),扫描去重后勾选入库。
 WESING_RES_DIR        = r"D:\WeSingCache\WeSingDL\Res"
 KARAOKE_LIBRARY_DIR   = r"D:\KaraokeLibrary"
 LIBRARY_JSON          = _os.path.join(KARAOKE_LIBRARY_DIR, "library.json")
-LIBRARY_SCAN_INTERVAL = 10.0       # 轮询间隔(秒)
 LIBRARY_SUFFIXES      = ("_accompany.pcm", "_kongsinger.pcm", ".note", ".qrc")
+
+# ── 手机版全民K歌导入(mobile_import.py + karaoke-player/mobile_convert.py)──
+ADB_PATH            = r"D:\scrcpy-win64-v3.3.1\adb.exe"   # scrcpy 附带(见 CLAUDE.md)
+MOBILE_PKG          = "com.tencent.karaoke"
+MOBILE_FILES        = "/sdcard/Android/data/com.tencent.karaoke/files"  # qrc/note/obbligato 在此
+MOBILE_STAGING_DIR  = _os.path.join(KARAOKE_LIBRARY_DIR, "_staging")    # 转换暂存
+MOBILE_CONVERT_PATH = _os.path.join(KARAOKE_DIR, "mobile_convert.py")
+MOBILE_TKM_WINDOW   = 180          # song↔tkm 按 mtime 聚类的时间窗(秒):qrc 与其两条 tkm 同批落盘
+PREVIEW_PLAY_PATH   = _os.path.join(KARAOKE_DIR, "preview_play.py")  # 扫描窗口「试听」轻量预览播放器
+PREVIEW_VOLUME      = 0.4           # 预览音量(走系统默认输出=自己听的通道,压低不吵)

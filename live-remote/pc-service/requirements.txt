@@ -8,3 +8,6 @@ pillow
 winrt-runtime
 winrt-Windows.Media.Control
 winrt-Windows.Foundation
+imageio-ffmpeg          # 手机导入:mobile_convert.py 解码 tkm→M4A→PCM(自带 ffmpeg 二进制)
+qrcode                  # 扫描窗口「扫码连接」:生成无线 ADB 配对二维码(pillow 已有)
+# 另需 karaoke-player 的 numpy/sounddevice/PySide6/audiotsm(同一解释器,见 config 注释)

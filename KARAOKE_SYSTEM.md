@@ -83,9 +83,10 @@ brief([`LiveRemote/UI_DESIGN.md`](LiveRemote/UI_DESIGN.md),已作历史 brief �
 
 ## 四、各部件职责
 
-- **pc-service(中枢,`live-remote/pc-service`)**:曲库监视器 + 队列 + 控制API + WS推送 + 网页UI;
+- **pc-service(中枢,`live-remote/pc-service`)**:曲库(手动扫描导入)+ 队列 + 控制API + WS推送 + 网页UI;
   原有声卡场景/QQ音乐BGM 保留。**不含音频引擎**——它通过**进程管道 IPC**(stdin 发指令/stdout 读状态)
-  托管并控制独立的播放器子进程。
+  托管并控制独立的播放器子进程。曲库导入走**托盘「扫描导入歌曲」窗口**:双端扫描(PC 缓存 + 手机全民K歌,
+  `library.scan_pc` + `mobile_import.scan_phone`)→ 去重 → 多选编辑(改名/换伴奏原唱)→ 勾选入库。
 - **K歌播放器(`karaoke-player/player.py`,独立子进程)**:音频引擎(载歌/解密/WSOLA变调/原唱切换/
   输出声卡)+ 绿底黑描边逐字歌词/音高条/KTV圆点渲染,供直播伴侣窗口捕获+绿幕。由 pc-service 拉起、
   经 IPC 控制(现已实现:显隐/清空全绿/禁关;待扩展:载任意歌/播停/升降调/seek/上报进度)。
@@ -98,8 +99,9 @@ brief([`LiveRemote/UI_DESIGN.md`](LiveRemote/UI_DESIGN.md),已作历史 brief �
 
 ## 五、数据流
 
-1. **备货**:在 WeSing 里唱一遍某歌 → `Res\<mid>\` 落盘 → 监视器把四件套拷进永久曲库 + 解 QRC 取
-   歌名/歌手 → 更新 `library.json`。(WeSing 缓存是 LRU 只留约4首,必须及时抢救。)
+1. **备货**:PC 版唱一遍(`Res\<mid>\` 落盘),**或**手机版全民K歌点开唱一遍(下 PC 下不到的歌);
+   然后托盘「扫描导入歌曲」→ 双端扫描去重 → 勾选入库(四件套拷进永久曲库 + 写 `meta.json`/`library.json`)。
+   手机侧 tkm(QMCv1 加密 M4A)由 `mobile_convert.py` 解密转成与 PC 一致的 XOR-PCM,下游零改动。
 2. **点歌**:手机搜曲库 → 点歌进队列 → 中枢控播放器载歌+播 → 伴奏输出声卡(进 Studio One 混音→直播)。
 3. **同步**:播放器(时钟)进度 → 中枢每~500ms WS 推 → 手机/直播画面渲染按进度插值滚动。
 
@@ -165,6 +167,12 @@ brief([`LiveRemote/UI_DESIGN.md`](LiveRemote/UI_DESIGN.md),已作历史 brief �
     KTV 双行错开歌词 + 压扁音准线(均"由白染蓝")、竖屏 3:4 窗、`Q` 字体循环 7 款、`P` 音准线显隐、
     `O`+`Ctrl+↑↓` 顶端滚动歌单、手机音量键感知曲线、歌名清洗+手动改名;显隐/字体/音量/歌单等跨重启缓存。
     详见各子项目 README 与 [live-remote/DEV_LOG.md](live-remote/DEV_LOG.md)。
+  - **手机版全民K歌接入 + 扫描导入改版(2026-07-26)**:破解手机 `.tkm` 伴奏(QQ音乐 QMCv1 静态密钥加密 M4A,
+    密钥表与 PC 伴奏 PCM 的 XOR 密钥同一张);新增 `karaoke-player/mobile_convert.py`(tkm→m4a→XOR-PCM、
+    oke→note、伴奏/原唱按中置能量自动判)+ `live-remote/pc-service/mobile_import.py`(adb 拉取 + mtime 就近
+    配对 song↔tkm)。曲库导入从**后台自动轮询**改为**托盘「扫描导入歌曲」窗口**:双端(PC+手机)扫描 →
+    去重 → 多选可编辑表格(改名/交换伴奏原唱)→ 勾选入库(`library.scan_pc`/`import_candidate`)。
+    手机歌转成与 PC 一致的四件套,播放器/点歌/升降调全链路零改动。补 PC 下不到的用户自传歌。
 - **待做**:第④步进一步端到端联调 + 直播绿幕接入细化;手机端持续打磨(新增的音准线开关等改动需重打 APK)。
   **第①②③步(曲库导入器 + 播放器托管 + 音频控制/队列 WS API + 原生 App)均已完成。**
 

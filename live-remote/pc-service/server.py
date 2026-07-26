@@ -58,6 +58,7 @@ import winmm_midi
 import studio_win
 import karaoke_win
 import library
+import mobile_import
 import karaoke_data
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -1437,6 +1438,314 @@ def _fmt_key(k):
     return "原调" if int(k) == 0 else ("%+d" % int(k))
 
 
+def _open_pair_dialog(parent, on_connected):
+    """无线 ADB 配对二维码框(与 parent 同线程 Toplevel)。手机『设置→开发者选项→无线调试→用二维码
+    配对设备』扫码 → 后台 adb mdns 发现 → adb pair → adb connect,成功回调 on_connected(serial)。"""
+    import tkinter as tk
+    try:
+        import qrcode
+        from PIL import ImageTk
+    except Exception as e:
+        from tkinter import messagebox
+        messagebox.showerror("缺少依赖", "无线配对二维码需要 qrcode 库:\npip install qrcode\n\n%s" % e)
+        return
+
+    name, code, data = mobile_import.make_pair_payload()
+    dlg = tk.Toplevel(parent)
+    dlg.title("无线 ADB 配对")
+    dlg.attributes("-topmost", True); dlg.resizable(False, False); dlg.grab_set()
+    st = {"stop": False, "serial": None, "done": False,
+          "msg": "手机:设置 → 开发者选项 → 无线调试 → 用二维码配对设备,扫下方二维码"}
+
+    img = qrcode.make(data)
+    pil = (img.get_image() if hasattr(img, "get_image") else img).resize((240, 240))
+    photo = ImageTk.PhotoImage(pil)
+    lbl_img = tk.Label(dlg, image=photo); lbl_img.image = photo   # 保引用防 GC
+    lbl_img.pack(padx=18, pady=(16, 6))
+    tk.Label(dlg, text="配对码:%s" % code, fg="#888888").pack()
+    status = tk.Label(dlg, text=st["msg"], wraplength=300, justify="center")
+    status.pack(padx=16, pady=10)
+
+    def _close():
+        st["stop"] = True
+        try:
+            dlg.destroy()
+        except Exception:
+            pass
+    tk.Button(dlg, text="取消", width=8, command=_close).pack(pady=(0, 14))
+    dlg.protocol("WM_DELETE_WINDOW", _close)
+
+    def _work():
+        try:
+            st["serial"] = mobile_import.wait_and_pair(
+                name, code, progress_cb=lambda m: st.update(msg=m), stop=lambda: st["stop"])
+        except Exception as e:
+            st["msg"] = "出错:%s" % e
+        st["done"] = True
+    threading.Thread(target=_work, daemon=True).start()
+
+    def _poll():
+        if st["stop"]:
+            return
+        status.config(text=st["msg"])
+        if st["done"]:
+            if st["serial"]:
+                status.config(text="✅ 已连接 %s" % st["serial"], fg="#1a7f37")
+                try:
+                    on_connected(st["serial"])
+                except Exception:
+                    pass
+                dlg.after(900, _close)
+            else:
+                status.config(text=st["msg"] + "(可取消重试)", fg="#c0392b")
+            return
+        dlg.after(300, _poll)
+    _poll()
+    dlg.after(120, dlg.focus_force)
+
+
+_preview_proc = None
+
+
+def _preview(cand):
+    """扫描窗口「试听」:子进程拉起 preview_play.py 播该曲伴奏(**系统默认输出**=自己听的通道)
+    + 纯文本歌词窗(←→ 步退进、Esc 退出)。单实例:再点/换歌先杀掉上一个。
+    cand['src_root']/'mid' 指向已转换好的四件套(手机=暂存目录,PC=WeSing 缓存)。"""
+    global _preview_proc
+    if _preview_proc is not None and _preview_proc.poll() is None:
+        try:
+            _preview_proc.terminate()
+        except Exception:
+            pass
+    try:
+        _preview_proc = subprocess.Popen(
+            [config.PLAYER_PYTHON, config.PREVIEW_PLAY_PATH, cand["src_root"], cand["mid"],
+             "--volume", str(config.PREVIEW_VOLUME)],
+            creationflags=0x08000000,       # CREATE_NO_WINDOW(抑制控制台;Tk 预览窗照常显示)
+            env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+    except Exception as e:
+        print("[SCAN] 试听启动失败:", e)
+
+
+def _open_scan_window():
+    """扫描导入窗:PC 缓存 + 手机全民K歌**双端扫描** → 去重 → 多选可编辑表格 → 勾选入库。
+    自带线程 + 自建 Tk 根(仿 _open_library_browser)。慢扫描(adb 拉取 + ffmpeg 转换,可能 ~30s)
+    放 worker 线程,共享态 st 由 root.after 轮询读,刷 loading 动画;扫完渲染表格。"""
+    NO_DEV = "(未检测到手机)"
+
+    def _win():
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title("扫描导入歌曲")
+        root.geometry("700x520")
+        root.attributes("-topmost", True)
+
+        st = {"phase": "idle", "msg": "", "results": None, "error": None,
+              "gen": 0, "serial": None, "import_done": None}
+        dev_map = {}   # 下拉显示名 -> serial
+
+        # 顶部:手机设备下拉 + 重新扫描
+        top = tk.Frame(root); top.pack(fill="x", padx=10, pady=(10, 4))
+        tk.Label(top, text="手机设备:").pack(side="left")
+        dev_var = tk.StringVar()
+        dev_cb = ttk.Combobox(top, textvariable=dev_var, state="readonly", width=26)
+        dev_cb.pack(side="left", padx=6)
+        tk.Button(top, text="📶 扫码连接",
+                  command=lambda: _open_pair_dialog(root, _on_paired)).pack(side="left")
+        rescan_btn = tk.Button(top, text="重新扫描"); rescan_btn.pack(side="right")
+
+        status_lbl = tk.Label(root, text="", anchor="w", fg="#666666")
+        status_lbl.pack(fill="x", padx=12)
+        prog = ttk.Progressbar(root, mode="indeterminate")   # loading(动态显隐)
+
+        # 表格区:Canvas + 内嵌 Frame + 滚动条
+        body = tk.Frame(root); body.pack(fill="both", expand=True, padx=(10, 0), pady=4)
+        canvas = tk.Canvas(body, highlightthickness=0)
+        vsb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        vsb.pack(side="right", fill="y"); canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg="#ffffff")
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
+        def _on_wheel(e):
+            # 内容比视口短就锁定顶部、不滚动(否则上滚会把短内容推下去、顶部露出一截空白);超出视口才滚。
+            if inner.winfo_height() <= canvas.winfo_height():
+                canvas.yview_moveto(0)
+                return
+            canvas.yview_scroll(int(-e.delta / 120), "units")
+        canvas.bind_all("<MouseWheel>", _on_wheel)
+        rows = []   # [{cand, chk, e_title, e_artist}]
+
+        # 底部按钮
+        bar = tk.Frame(root); bar.pack(fill="x", padx=10, pady=(2, 10))
+
+        def _set_all(v):
+            for r in rows:
+                r["chk"].set(v)
+        tk.Button(bar, text="全选", width=6, command=lambda: _set_all(True)).pack(side="left")
+        tk.Button(bar, text="全不选", width=7, command=lambda: _set_all(False)).pack(side="left", padx=4)
+        confirm_btn = tk.Button(bar, text="确认入库"); confirm_btn.pack(side="right")
+        tk.Button(bar, text="取消", width=7, command=root.destroy).pack(side="right", padx=6)
+
+        C_EVEN, C_ODD = "#ffffff", "#f4f5f7"
+        _TITLE_PH = "（待命名，点此输入）"    # 空标题占位,别显示成空白行;导入时视为空(仍走 needs_name)
+
+        def _row_title(r):
+            """取行内歌名:占位没动过 → 视为空(让 import_candidate 回退 QRC / 标 needs_name)。"""
+            w = r["e_title"]; t = w.get()
+            return "" if (getattr(w, "_ph", None) and t == w._ph) else t
+
+        def _clear_rows():
+            for w in inner.winfo_children():
+                w.destroy()
+            rows.clear()
+
+        def _add_row(cand, idx):
+            base = C_EVEN if idx % 2 == 0 else C_ODD
+            rf = tk.Frame(inner, bg=base); rf.pack(fill="x")
+            rf.columnconfigure(1, weight=1, minsize=150)
+            chk = tk.BooleanVar(value=True)
+            tk.Checkbutton(rf, variable=chk, bg=base, activebackground=base).grid(row=0, column=0, padx=(6, 2))
+            e_t = tk.Entry(rf, width=24)
+            title = (cand.get("title") or "").strip()
+            if title:
+                e_t.insert(0, title)
+            else:                                  # 空标题(待命名):灰红占位,别显示成空白行
+                e_t.insert(0, _TITLE_PH); e_t.config(fg="#c0392b"); e_t._ph = _TITLE_PH
+
+                def _clear_ph(ev, w=e_t):          # 点击/聚焦即清占位,可直接输入
+                    if getattr(w, "_ph", None) and w.get() == w._ph:
+                        w.delete(0, "end"); w.config(fg="#111111"); w._ph = None
+                e_t.bind("<FocusIn>", _clear_ph)
+            e_t.grid(row=0, column=1, sticky="we", padx=2, pady=4)
+            e_a = tk.Entry(rf, width=12)
+            e_a.insert(0, cand.get("artist") or "")
+            e_a.grid(row=0, column=2, padx=2)
+            tk.Label(rf, text=cand["source"], bg=base, fg="#888888", width=4).grid(row=0, column=3, padx=(2, 8))
+            tk.Button(rf, text="▶ 试听", command=lambda c=cand: _preview(c)).grid(row=0, column=4, padx=(2, 6))
+            # 伴奏/原唱结构固定、自动判别即准,不提供交换按钮(确认一次即可)。
+            rows.append({"cand": cand, "chk": chk, "e_title": e_t, "e_artist": e_a})
+
+        def _render_new():
+            """增量渲染:把 results 里比已渲染行多出来的部分追加成行(扫出一首显示一首)。"""
+            results = st["results"] or []
+            for i in range(len(rows), len(results)):
+                _add_row(results[i], i)
+
+        # ---- 扫描 worker(慢:adb 拉取 + ffmpeg 转换;每转好一首即入 results,UI 增量显示)----
+        def _do_scan(gen, serial):
+            def pcb(msg):
+                if st["gen"] == gen:
+                    st["msg"] = msg
+
+            def add(c):
+                if st["gen"] == gen:
+                    st["results"].append(c)         # 追加到 _start_scan 建好的同一 list
+
+            try:
+                st["msg"] = "扫描 PC 缓存…"
+                for c in library.scan_pc():          # PC 侧快,先全部铺上
+                    add(c)
+                if serial:
+                    st["msg"] = "扫描手机…"
+                    mobile_import.scan_phone(serial, progress_cb=pcb, on_candidate=add)
+                if st["gen"] == gen:
+                    st["phase"] = "done"
+            except Exception as e:                   # 手机侧异常:已铺的 PC/部分结果保留
+                if st["gen"] == gen:
+                    st["error"], st["phase"] = str(e), "done"
+
+        def _start_scan():
+            st["gen"] += 1
+            st.update(phase="scanning", msg="准备…", results=[], error=None)
+            st["serial"] = dev_map.get(dev_var.get())
+            _clear_rows(); canvas.yview_moveto(0)
+            prog.pack(fill="x", padx=12, pady=4, before=body); prog.start(12)
+            confirm_btn.config(state="disabled"); rescan_btn.config(state="disabled")
+            threading.Thread(target=_do_scan, args=(st["gen"], st["serial"]), daemon=True).start()
+
+        def _poll():
+            _render_new()                            # 扫出一首渲一首
+            n = len(st["results"] or [])
+            if st["phase"] == "scanning":
+                status_lbl.config(text="扫描中… %s(已发现 %d 首)" % (st.get("msg", ""), n), fg="#666666")
+            elif st["phase"] == "done":
+                prog.stop(); prog.pack_forget()
+                confirm_btn.config(state="normal"); rescan_btn.config(state="normal")
+                if st["error"]:
+                    status_lbl.config(text="⚠ 手机扫描失败:%s(已列出 PC/已转换的)" % st["error"], fg="#c0392b")
+                elif n:
+                    status_lbl.config(text="扫描到 %d 首库里没有的新歌;勾选要导入的,可改歌名/原唱,确认入库。" % n,
+                                      fg="#666666")
+                else:
+                    status_lbl.config(text="没有库里缺的新歌。", fg="#666666")
+                st["phase"] = "idle"
+            root.after(150, _poll)
+
+        # ---- 确认入库(后台线程做拷贝,完成后关窗)----
+        def _confirm():
+            picked = [r for r in rows if r["chk"].get()]
+            if not picked:
+                root.destroy(); return
+            confirm_btn.config(state="disabled"); rescan_btn.config(state="disabled")
+            status_lbl.config(text="正在入库 %d 首…" % len(picked), fg="#666666")
+            st["import_done"] = None
+
+            def _work():
+                n = 0
+                for r in picked:
+                    try:
+                        library.import_candidate(r["cand"], _row_title(r),
+                                                 r["e_artist"].get())
+                        n += 1
+                    except Exception as e:
+                        print("[SCAN] 入库失败 %s: %s" % (r["cand"]["mid"], e))
+                try:
+                    _on_lib_change()               # 刷托盘 + 推手机 + 推歌单
+                except Exception:
+                    pass
+                st["import_done"] = n
+            threading.Thread(target=_work, daemon=True).start()
+
+            def _wait():
+                if st["import_done"] is None:
+                    root.after(150, _wait); return
+                root.destroy()
+            root.after(150, _wait)
+
+        confirm_btn.config(command=_confirm)
+        rescan_btn.config(command=_start_scan)
+
+        # 设备下拉(默认选第一台;扫码连上后选中新设备);换设备即重扫
+        def _reload_devices(select_serial=None):
+            devs = mobile_import.list_devices()
+            dev_map.clear()
+            if devs:
+                for d in devs:
+                    dev_map[mobile_import.device_label(d)] = d
+                labels = list(dev_map.keys())
+                dev_cb["values"] = labels
+                dev_var.set(next((l for l, s in dev_map.items() if s == select_serial), labels[0]))
+            else:
+                dev_cb["values"] = [NO_DEV]; dev_var.set(NO_DEV)
+
+        def _on_paired(serial):           # 扫码配对成功:刷新设备、选中新机、重扫
+            _reload_devices(select_serial=serial)
+            _start_scan()
+
+        _reload_devices()
+        dev_cb.bind("<<ComboboxSelected>>", lambda e: _start_scan())
+
+        _poll()
+        _start_scan()
+        root.after(120, root.focus_force)
+        root.mainloop()
+
+    threading.Thread(target=_win, daemon=True).start()
+
+
 def _open_library_browser(selftest=False):
     """点托盘"曲库: N 首" → 曲库管理窗(高性能版):
     - 搜索框 **200ms 防抖**(老版每敲一键全量重建所有行,正是卡顿主因之一);
@@ -1495,8 +1804,13 @@ def _open_library_browser(selftest=False):
                        lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
             canvas.bind("<Configure>",
                         lambda e: canvas.itemconfig(win_id, width=e.width))
-            canvas.bind_all("<MouseWheel>",         # 滚轮(本解释器独享,窗口关即失效)
-                            lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+            def _on_wheel(e):                       # 滚轮(本解释器独享,窗口关即失效)
+                # 内容比视口短就锁顶不滚,防上滚把短内容推下、顶部露白;超出才滚。
+                if inner.winfo_height() <= canvas.winfo_height():
+                    canvas.yview_moveto(0)
+                    return
+                canvas.yview_scroll(int(-e.delta / 120), "units")
+            canvas.bind_all("<MouseWheel>", _on_wheel)
 
             # 行配色:斑马纹交替底色 + 悬停高亮 + 点击选中态(纯 tk 无 Treeview 选中样式,手动画)
             C_EVEN, C_ODD, C_HOVER, C_SEL = "#ffffff", "#f4f5f7", "#eaf1fb", "#c8e0f8"
@@ -1865,6 +2179,9 @@ def run_tray(url):
     def on_open_library(icon, item):
         _open_library_browser()        # 打开曲库管理窗(倒序列表 + 搜索 + 编辑)
 
+    def on_open_scan(icon, item):
+        _open_scan_window()            # 扫描导入窗(PC+手机双端扫描 → 多选编辑入库)
+
     def on_edit_performer(icon, item):
         _open_performer_dialog()       # 编辑演唱者(主播名,开头标题卡用)
 
@@ -1877,6 +2194,8 @@ def run_tray(url):
             None, enabled=False),
         # 曲库:可点击 → 曲库管理窗(倒序/搜索/编辑歌名歌手)
         pystray.MenuItem(lambda i: f"曲库: {STATE['lib_count']} 首 — 点击管理", on_open_library),
+        # 扫描导入:PC 缓存 + 手机全民K歌双端扫描,去重后多选编辑入库
+        pystray.MenuItem("扫描导入歌曲", on_open_scan),
         # 演唱者(主播名):点击编辑,开头标题卡"演唱:<名>"用
         pystray.MenuItem(lambda i: f"演唱者：{STATE.get('performer', '八门官上')}", on_edit_performer),
         pystray.Menu.SEPARATOR,

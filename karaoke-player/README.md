@@ -56,6 +56,28 @@
    > 从歌曲开头静音段直接读出密钥。验证:解密后前 1 秒精确静音、整轨 RMS 0.2 = 真音乐。
    > (曾误判 AES 去读 WeSing 内存暴破,是弯路。)
 
+## 数据来源:手机版全民K歌(2026-07-25 接入,补 PC 下不到的歌)
+
+PC 版对用户自传/部分歌下不了伴奏;手机版能下。安卓(adb 可读 `Android/data`,模拟器免 root)
+资源在 `/sdcard/Android/data/com.tencent.karaoke/files/`:
+
+- `qrc/<songmid>_original.qrc` —— 逐字歌词,**hex 文本**(与 PC 同 3DES+zlib 链;`assets._qrc_decrypt` 直接吃)。
+- `note/<songmid>.oke` —— 音高,**hex 文本**,**同一条 3DES+zlib 链**解出即 PC `.note` 明文
+  (`assets.load_notes` 已能自动识别 `.oke`/hex 并解密)。
+- `obbligato/<filemid>.tkm` —— 伴奏/原唱,**QQ音乐 QMCv1 静态密钥加密的 M4A**。
+
+**tkm(QMCv1)破解**:`mask128[i] = KEY256[(i*i + 27) & 0xff]`(i=0..127);keystream = `mask128*256`
+(前 32768B 纯周期128)再按 0x7FFF 环绕(`startblk = firstblk + firstblk[1:-1]` 共 65534B,
+`commonblk = firstblk[:-1]` 32767B 循环);明文 = 密文 XOR keystream → 标准 M4A,ffmpeg 解码。
+**关键**:这张 `KEY256` 与 PC 伴奏 PCM 的 256 字节 XOR 密钥(`wesing_pcm_key.PCM_XOR_KEY`)是**同一张表**,
+只是用法不同(PC=直接 256 周期 XOR;手机=二次索引 mask128)。即 QQ音乐圈子里的 QMCv1 静态映射密码
+(unlock-music / libtakiyasha 支持的 `.tkm`),不必自研逆向。
+> 密文分析时的"周期128、非简单XOR"假象正是 `(i²+27)%256` 二次索引造成的;头 8 字节 `c3 4a d6 ca 90 67 f7 52`
+> = mask128 头,与 m4a `ftyp` crib 反推逐字节吻合。
+
+转换器 `mobile_convert.py` 把手机三件套 → PC 四件套(伴奏/原唱按 note 时间轴**中置声道能量比**自动判:
+消了中置人声那条比值明显<1;实测伴奏 0.49 vs 原唱 1.0)。由 pc-service 的扫描导入窗口以子进程调用。
+
 ---
 
 ## 代码结构
@@ -64,9 +86,11 @@
 |---|---|
 | `player.py` | 主程序:PySide6 无边框窗 + 逐字歌词/音高条/KTV引导圆点渲染 + 热键。**顶部写死当前歌配置**。 |
 | `audio_engine.py` | 实时音频引擎:后台生产者线程做**连续流式 WSOLA 变调**喂队列,sd 回调只取。 |
-| `assets.py` | 数据加载:QRC 歌词解码、`.note` 音高解析、加密PCM 解密加载(`load_pcm`)。 |
+| `assets.py` | 数据加载:QRC 歌词解码、`.note`/`.oke` 音高解析、加密PCM 解密加载(`load_pcm`)。 |
+| `mobile_convert.py` | **手机版资源 → PC 四件套**转换器(子进程 CLI):tkm(QMCv1)→m4a→XOR-PCM、oke→note、qrc 拷贝、伴奏/原唱自动判。 |
+| `preview_play.py` | 扫描导入窗「▶试听」用的**轻量预览播放器**(子进程):sounddevice 系统默认输出播伴奏(音量压低)+ Tk 纯文本歌词窗(当前行高亮、←→步退进5s、Esc退出)。 |
 | `tripledes.py` / `qmc1.py` | QRC 的魔改 DES 解密(被 assets 引用)。 |
-| `wesing_pcm_key.py` | 伴奏/原唱 PCM 的静态 256 字节 XOR 密钥。 |
+| `wesing_pcm_key.py` | 伴奏/原唱 PCM 的静态 256 字节 XOR 密钥(**= 手机 tkm 的 QMCv1 KEY256,同一张表**)。 |
 | `audio_test.py` | 声卡输出设备排查工具(`--list` 列设备,`<index>` 放测试音)。 |
 | `smtc_publisher.py` | 发布 SMTC 会话(曾想让直播伴侣歌词助手识别,**现已弃用**,见下,留着无害)。 |
 | `lyrics_overlay_demo.html` | 歌词渲染的网页版(手机端 WebView 用;直播端不用浏览器,见下)。 |

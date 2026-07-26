@@ -118,17 +118,28 @@ class Note:
         return self.start + self.dur
 
 
+def _note_text(note_path: str) -> str:
+    """读取音高文本。PC 版 `.note` 是明文;手机版 `.oke` 是 hex(与 QRC 同链 3DES+zlib 加密),
+    自动识别并解密。统一返回明文 `起始ms 时长ms MIDI` 文本。"""
+    raw = open(note_path, "rb").read()
+    s = raw.strip()
+    # 明文 .note 每行 3 个数字带空格;hex .oke 是无空格连续 hex。据此(或按 .oke 扩展名)区分。
+    is_hex = bool(s) and b" " not in s and all(c in b"0123456789abcdefABCDEF\r\n\t" for c in s)
+    if note_path.lower().endswith(".oke") or is_hex:
+        return _qrc_decrypt(raw)      # 手机 .oke:hex→3DES(QRC_KEY)→zlib
+    return raw.decode("utf-8", "ignore")
+
+
 def load_notes(note_path: str):
-    """解析 .note → list[Note]。每行 `起始ms 时长ms MIDI音高`。"""
+    """解析 .note(PC 明文)或 .oke(手机加密)→ list[Note]。每行 `起始ms 时长ms MIDI音高`。"""
     notes = []
-    with open(note_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            p = line.split()
-            if len(p) >= 3:
-                try:
-                    notes.append(Note(int(p[0]), int(p[1]), int(p[2])))
-                except ValueError:
-                    pass
+    for line in _note_text(note_path).splitlines():
+        p = line.split()
+        if len(p) >= 3:
+            try:
+                notes.append(Note(int(p[0]), int(p[1]), int(p[2])))
+            except ValueError:
+                pass
     notes.sort(key=lambda n: n.start)
     return notes
 

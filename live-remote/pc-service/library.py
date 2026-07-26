@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""自动曲库导入器:监听 WeSing 缓存(Res\\,LRU 只留最近几首),把唱过的歌四件套
-拷进永久曲库(config.KARAOKE_LIBRARY_DIR),解 QRC 取歌名/歌手写 meta.json,维护 library.json。
-后台 daemon 线程:启动先 backfill 全量补齐,之后每 LIBRARY_SCAN_INTERVAL 轮询;
-文件连续两轮 (size,mtime) 签名一致(=写完)才入库。"""
+"""曲库层:维护永久曲库(config.KARAOKE_LIBRARY_DIR)+ 清单 library.json,解 QRC 取歌名/歌手。
+导入改为**手动扫描窗口触发**(不再后台轮询):
+- scan_pc():列 PC 版 WeSing 缓存里库中没有的新歌候选(手机侧候选见 mobile_import.py);
+- import_candidate(cand, title, artist, swap):把用户勾选的候选(PC 或手机来源)拷进曲库并登记,
+  支持用户编辑歌名/歌手、对调伴奏/原唱。
+start() 只载入清单 + 后台跑一次启动迁移(_remigrate,用当前清洗规则修旧脏标题)。"""
 import os
 import sys
 import re
@@ -150,7 +152,8 @@ def _qrc_meta(qrc_path):
         return mm.group(1).strip() if mm else ""
 
     ti, ar = g("ti"), g("ar")
-    artist = "" if re.fullmatch(r"\d+", ar) else ar     # 纯数字歌手(如"0")=垃圾,清掉
+    # 纯数字(如"0")/ 字面量 None|null = 垃圾歌手,清掉
+    artist = "" if (re.fullmatch(r"\d+", ar) or ar.strip().lower() in ("none", "null")) else ar
     title = _clean_title(ti, ar)
     return {"title": title, "artist": artist, "needs_name": _is_junk_title(title)}
 
@@ -163,12 +166,6 @@ def _paths(root, mid):
 
 def _complete(root, mid):
     return all(os.path.isfile(p) for p in _paths(root, mid))
-
-
-def _signature(root, mid):
-    """四文件 (size, mtime) 元组;两轮一致 = 写完。"""
-    return tuple((os.stat(p).st_size, int(os.stat(p).st_mtime))
-                 for p in _paths(root, mid))
 
 
 # ---------------------------------------------------- 清单
@@ -191,54 +188,76 @@ def _already(man, mid):
     return mid in man and os.path.isfile(os.path.join(dst, "meta.json"))
 
 
-# ---------------------------------------------------- 入库
-def _import_one(mid, man):
-    dst = os.path.join(config.KARAOKE_LIBRARY_DIR, mid)
-    os.makedirs(dst, exist_ok=True)
-    for p in _paths(config.WESING_RES_DIR, mid):     # 拷 4 文件(PCM 各 ~78MB)
-        shutil.copy2(p, os.path.join(dst, os.path.basename(p)))
-    meta = _qrc_meta(os.path.join(dst, mid + ".qrc"))   # QRC 未下完会抛异常 → 本首不落库,下轮重试
-    json.dump(meta, open(os.path.join(dst, "meta.json"), "w", encoding="utf-8"),
-              ensure_ascii=False, indent=2)
-    man[mid] = {**meta, "added": time.time(),
-                "plays": int(man.get(mid, {}).get("plays", 0)),    # 重入库保留已有点歌次数
-                "key": int(man.get(mid, {}).get("key", 0))}        # 及默认调式
-    _save_manifest(man)
-    return meta
-
-
-def _scan_once(man, pending):
-    """扫一遍 Res:齐全且未入库的记签名,连续两轮一致才入库。返回本轮新入库数。"""
-    added = 0
+# ---------------------------------------------------- 扫描候选(不入库)
+def scan_pc():
+    """扫 PC 版 WeSing 缓存(WESING_RES_DIR),返回**库里没有的**新歌候选(不入库)。
+    每个候选:{mid, source:"PC", src_root, title, artist, needs_name}。
+    供扫描窗口列出、用户勾选后再经 import_candidate 入库。"""
+    cands = []
     try:
         entries = os.listdir(config.WESING_RES_DIR)
     except Exception:
-        return 0
+        return cands
     for mid in entries:
         if not os.path.isdir(os.path.join(config.WESING_RES_DIR, mid)):
             continue
-        if _already(man, mid) or not _complete(config.WESING_RES_DIR, mid):
-            pending.pop(mid, None)
+        if _already(_MANIFEST, mid) or not _complete(config.WESING_RES_DIR, mid):
             continue
         try:
-            sig = _signature(config.WESING_RES_DIR, mid)
-        except Exception:
+            meta = _qrc_meta(os.path.join(config.WESING_RES_DIR, mid, mid + ".qrc"))
+        except Exception as e:
+            print(f"[LIB] 跳过 {mid}(QRC 解析失败): {e}")
             continue
-        if pending.get(mid) == sig:              # 稳定 → 入库
-            try:
-                meta = _import_one(mid, man)
-                added += 1
-                if _on_import:
-                    try:                         # 通知失败绝不影响入库循环
-                        _on_import(mid, meta, len(man))
-                    except Exception:
-                        pass
-            except Exception as e:
-                print(f"[LIB] 导入 {mid} 失败(下轮重试): {e}")
-            pending.pop(mid, None)
-        else:
-            pending[mid] = sig                   # 记签名,下轮再比
-    return added
+        cands.append({"mid": mid, "source": "PC", "src_root": config.WESING_RES_DIR,
+                      "title": meta["title"], "artist": meta["artist"],
+                      "needs_name": meta["needs_name"]})
+    return cands
+
+
+# ---------------------------------------------------- 入库(单个候选)
+def import_candidate(cand, title=None, artist=None, swap=False):
+    """把一个候选(PC 或手机来源)拷进永久曲库并登记。
+    - cand["src_root"] 决定源目录(PC=WESING_RES_DIR;手机=已转换的暂存目录);
+    - title/artist 非空则用**用户编辑值**覆盖(置 named=True,防启动 _remigrate 覆盖),否则解 QRC;
+    - swap=True 把 _accompany.pcm / _kongsinger.pcm 对调(修正伴奏/原唱判别);
+    - 重入库保留已有 plays / key。返回 meta。"""
+    mid = cand["mid"]
+    src_root = cand["src_root"]
+    dst = os.path.join(config.KARAOKE_LIBRARY_DIR, mid)
+    os.makedirs(dst, exist_ok=True)
+    for p in _paths(src_root, mid):                  # 拷四件套(PCM 各 ~50MB)
+        name = os.path.basename(p)
+        if swap and name.endswith("_accompany.pcm"):
+            name = mid + "_kongsinger.pcm"
+        elif swap and name.endswith("_kongsinger.pcm"):
+            name = mid + "_accompany.pcm"
+        shutil.copy2(p, os.path.join(dst, name))
+
+    title = (title or "").strip()
+    artist = (artist or "").strip()
+    if title:                                        # 用户编辑值优先
+        meta = {"title": title, "artist": artist, "needs_name": False}
+        named = True
+    else:
+        meta = _qrc_meta(os.path.join(dst, mid + ".qrc"))
+        named = False
+    json.dump({"title": meta["title"], "artist": meta["artist"]},
+              open(os.path.join(dst, "meta.json"), "w", encoding="utf-8"),
+              ensure_ascii=False, indent=2)
+    prev = _MANIFEST.get(mid, {})
+    ent = {"title": meta["title"], "artist": meta["artist"],
+           "added": time.time(),
+           "plays": int(prev.get("plays", 0)),       # 重入库保留点歌次数
+           "key": int(prev.get("key", 0))}           # 及默认调式
+    if meta.get("needs_name"):
+        ent["needs_name"] = True
+    if named:
+        ent["named"] = True                          # 手动命名过,_remigrate 不覆盖
+    _MANIFEST[mid] = ent
+    _save_manifest(_MANIFEST)
+    if _state is not None:
+        _state["lib_count"] = len(_MANIFEST)
+    return meta
 
 
 def _remigrate(man):
@@ -276,7 +295,8 @@ def _remigrate(man):
 
 
 def _worker():
-    # 迁移(读 QRC 慢)放后台,不阻塞启动;_MANIFEST 已在 start() 同步载好。
+    # 启动迁移(读 QRC 慢)放后台跑一次,不阻塞启动;_MANIFEST 已在 start() 同步载好。
+    # **不再周期轮询**:导入改为扫描窗口手动触发(scan_pc / mobile_import + import_candidate)。
     try:
         _remigrate(_MANIFEST)     # 用新清洗规则修旧条目(幂等,跳过手动命名的)
     except Exception as e:
@@ -285,26 +305,13 @@ def _worker():
         _state["lib_count"] = len(_MANIFEST)
     if _on_change:
         _on_change()              # 迁移后回调(歌名已修正,server 侧会带修正名重推歌单)
-    pending = {}
-    while True:
-        try:
-            added = _scan_once(_MANIFEST, pending)   # 就地更新 _MANIFEST
-        except Exception as e:
-            print(f"[LIB] 扫描异常: {e}")
-            added = 0
-        if added and _state is not None:
-            _state["lib_count"] = len(_MANIFEST)
-            if _on_change:
-                _on_change()                         # 刷托盘 + 推手机(歌单已更新)
-        time.sleep(config.LIBRARY_SCAN_INTERVAL)
 
 
 def start(state, on_change=None, on_import=None):
-    """启动后台监听线程。state=server.STATE;on_change=曲库变化回调(刷托盘+推手机);
-    on_import=单曲入库成功回调 (mid, meta, 库存数),供 server 弹系统通知。"""
+    """载入曲库清单 + 后台跑一次启动迁移。state=server.STATE;on_change=曲库变化回调
+    (刷托盘+推手机);on_import 保留兼容(手动扫描窗口自己反馈,不再用它弹单曲通知)。"""
     global _state, _on_change, _on_import, _MANIFEST
     _state, _on_change, _on_import = state, on_change, on_import
     _MANIFEST = _load_manifest()   # **同步载入**(小 json,快):确保随后 start_player 的
     state["lib_count"] = len(_MANIFEST)   # _push_setlist 能立即取到歌名(修歌单启动为空的竞态)
-    state["watcher_running"] = True
     threading.Thread(target=_worker, daemon=True).start()

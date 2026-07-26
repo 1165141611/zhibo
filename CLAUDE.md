@@ -49,7 +49,11 @@
     在 `PLAYBACK 3/4`/`VIRTUAL REC 3/4` 挂着麦克风链路会话。现已按父进程链归属校验 + 设备
     白名单修复。**教训:腾讯系音频会话按进程名匹配必须校验父链归属**)。
 - **全民K歌**:PC 版 `WeSing.exe`(`D:\WeSing\WeSing.exe`),缓存在 `D:\WeSingCache\WeSingDL\`;
-  手机版包名 `com.tencent.karaoke`。
+  手机版包名 `com.tencent.karaoke`(资源在 `/sdcard/Android/data/com.tencent.karaoke/files/{qrc,note,obbligato}`,
+  adb 可读、模拟器免 root)。**手机版补 PC 下不到的歌**:歌词 `.qrc`/音高 `.oke` 与 PC 同 3DES+zlib 链;伴奏
+  `.tkm` 是 QQ音乐 **QMCv1 静态密钥加密的 M4A**(`mask128[i]=KEY256[(i²+27)&0xff]`,KEY256 与 PC 伴奏 PCM 的
+  XOR 密钥 `wesing_pcm_key.PCM_XOR_KEY` 同一张表)。转换器 `karaoke-player/mobile_convert.py` + 编排
+  `live-remote/pc-service/mobile_import.py`(adb 拉取 + mtime 就近配对 song↔tkm),经托盘「扫描导入歌曲」窗口入库。
 - **QQ音乐**:PC 版做直播 BGM。**音量**按进程名(带父链归属校验)用 pycaw 控;**播放/暂停/切歌**
   走 SMTC 会话有方向控制(winrt 子进程按 AUMID 锁定 QQ音乐 会话,见 `config.QQMUSIC_SMTC_HINT`),
   不再用无方向的全局媒体键(会被抢占系统当前会话的 App 截走)。
@@ -73,6 +77,10 @@
   跨重启缓存(场景/音量/Studio显隐/音准线显隐/字体/歌单)存 `state_cache.json`。
   **点歌逻辑打磨(2026-07-15)**:空队列点第一首也不自动开唱(`k_enqueue` 空闲时只 `load` 载入开头暂停),
   与"唱完切下首暂停"一致,首歌待唱期间 BGM 顶着、主播手动按播放开唱。
+  **曲库导入改版(2026-07-26)**:原后台自动轮询**已移除**,改托盘「扫描导入歌曲」窗口:**双端扫描**
+  (PC 缓存 `library.scan_pc` + 手机全民K歌 `mobile_import.scan_phone`,adb 拉取 + `mobile_convert.py` 子进程解密)
+  → 去重 → **多选可编辑表格**(改歌名/原唱 + 交换伴奏原唱)→ 勾选入库(`library.import_candidate`)。
+  loading 动画 + adb 设备下拉(默认第一台)+ 连接状态。手机歌转成与 PC 一致四件套,下游零改动。
 - **LiveRemote**:安卓原生 App(Compose,演唱/队列/遥控三页签),遥控页含声卡场景 + 窗口开关
   (Studio One / K歌歌词 / 音准线显隐);**QQ音乐 已从遥控页单列控制区移除,改由常驻悬浮球(现含遥控页,
   三页签通吃)统一承载**;点歌抽屉支持搜索 + 触底分页;**演唱页音准块高亮对齐 PC(2026-07-15):
@@ -93,6 +101,8 @@
   + 开唱前空一拍**(slot=lead/(n+1));顶端滚动歌单也统一成未唱歌词款(白底黑描边,名间隔减半);⑤音准线
   加粗描边看齐歌词、**起唱竖线改音高游标**(白亮点+光晕,y 随音符上下滑动、无音符落底);⑥**开头标题卡**
   (开唱前几秒居中显 歌名/原唱/演唱:主播名,渐隐后出歌词+音准线;演唱者=托盘可改的 `performer`,缓存+IPC 下发)。
+  **手机版接入(2026-07-26)**:新增 `mobile_convert.py`——手机全民K歌三件套(hex-QRC / hex-`.oke` /
+  QMCv1 加密 `.tkm`)→ PC 四件套(伴奏/原唱按 note 中置能量自动判);`assets.load_notes` 已能直接解 `.oke`。
   **做 K歌 大功能前先读根 [KARAOKE_SYSTEM.md](KARAOKE_SYSTEM.md)。**
 
 > 更细的历史与踩坑记录在各子项目 README 及 `live-remote/DEV_LOG.md`。
