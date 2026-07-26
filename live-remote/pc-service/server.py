@@ -734,6 +734,8 @@ _player_io_exec = concurrent.futures.ThreadPoolExecutor(
 _tray_icon = None       # pystray 托盘图标(供刷新)
 _tray_thread_id = None  # 托盘消息泵所在线程 id;update_menu 只能在该线程调(跨线程改 Win32 菜单会崩)
 _tray_hwnd = None       # 托盘消息窗 HWND(PostMessage 跨线程唤醒托盘线程刷新用)
+_lib_root = None        # 曲库管理窗 Tk 根(None=未开):托盘勾选反映开关态 + 单实例 + 再点即关
+_scan_root = None       # 扫描导入窗 Tk 根(同上)
 _last_import_mid = None  # 最近一首入库的 mid(=当前气泡通知对应的歌;点气泡→改它)
 # 自定义窗口消息:WM_USER(0x400) pystray 自用 +10(STOP)/+11(NOTIFY);我们用 +20 触发刷新
 WM_TRAY_REFRESH = 0x400 + 20
@@ -1003,14 +1005,7 @@ async def _handle_cmd(data):
     elif cmd == "reset_scene":
         reset_mute_state()   # 归位:记录重置为全不静音(需你先把 4 条 M 都关掉)
     elif cmd == "studio_toggle":
-        if STATE.get("studio_visible", True):
-            if studio_win.hide():
-                STATE["studio_visible"] = False
-                _save_persist()      # 显隐状态跨重启持久(同场景/音量)
-        else:
-            if studio_win.show():
-                STATE["studio_visible"] = True
-                _save_persist()
+        _toggle_studio_visible()     # 托盘/App 共用:show/hide + 存盘 + 刷托盘勾选 + 推 App 同步
     elif cmd == "player_toggle":
         toggle_player()
     elif cmd == "pitch_toggle":
@@ -1324,6 +1319,47 @@ def _threadsafe_broadcast():
         asyncio.run_coroutine_threadsafe(_broadcast(), _loop)
 
 
+def _toggle_studio_visible():
+    """切 Studio One 窗口显隐——**托盘菜单 与 App 的 `studio_toggle` 共用同一套**:show/hide + 更新
+    STATE + 存盘 + 刷托盘勾选 + 推手机(让 App 端显隐开关同步)。返回新的可见态。"""
+    if STATE.get("studio_visible", True):
+        if studio_win.hide():
+            STATE["studio_visible"] = False
+    else:
+        if studio_win.show():
+            STATE["studio_visible"] = True
+    _save_persist()
+    refresh_tray()               # 托盘勾选(App 触发时也刷,双向同步)
+    _threadsafe_broadcast()      # 推 App(托盘触发时让 App UI 同步;从事件循环触发=多推一次,无害)
+    return STATE["studio_visible"]
+
+
+def _toggle_library_window(icon=None, item=None):
+    """托盘「曲库」:未开→开;已开→关窗(单实例,绝不重复开)。勾选态随 _lib_root 反映(见 _win)。"""
+    global _lib_root
+    r = _lib_root
+    if r is not None:
+        try:
+            r.after(0, r.destroy)          # 已开 → 关(Tk 调用 marshal 回它自己线程)
+        except Exception:
+            _lib_root = None; refresh_tray()
+    else:
+        _open_library_browser()
+
+
+def _toggle_scan_window(icon=None, item=None):
+    """托盘「扫描导入歌曲」:未开→开;已开→关窗(单实例)。勾选态随 _scan_root 反映。"""
+    global _scan_root
+    r = _scan_root
+    if r is not None:
+        try:
+            r.after(0, r.destroy)
+        except Exception:
+            _scan_root = None; refresh_tray()
+    else:
+        _open_scan_window()
+
+
 def _on_lib_change():
     """曲库变化:刷托盘 + 推手机 + 重推歌单(歌名可能被迁移修正,或新歌入库)。"""
     refresh_tray()
@@ -1578,6 +1614,7 @@ def _open_scan_window():
     NO_DEV = "(未检测到手机)"
 
     def _win():
+        global _scan_root
         import tkinter as tk
         from tkinter import ttk
 
@@ -1585,6 +1622,8 @@ def _open_scan_window():
         root.title("扫描导入歌曲")
         root.geometry("720x560")
         root.attributes("-topmost", True)
+        _scan_root = root
+        refresh_tray()                 # 反映"已打开"的托盘勾选
 
         # 双页签:K歌(带音准)=本地缓存扫描;QQ(无音准)=登录态在线搜索
         nb = ttk.Notebook(root); nb.pack(fill="both", expand=True)
@@ -2068,8 +2107,12 @@ def _open_scan_window():
         tk.Label(qtop, text="搜索:", fg="#666666").pack(side="right")
         _refresh_login_ui(); _qpoll()
 
-        root.after(120, root.focus_force)
-        root.mainloop()
+        try:
+            root.after(120, root.focus_force)
+            root.mainloop()
+        finally:
+            _scan_root = None          # 关窗 → 去托盘勾选
+            refresh_tray()
 
     threading.Thread(target=_tk_window_thread(_win), daemon=True).start()
 
@@ -2086,12 +2129,16 @@ def _open_library_browser(selftest=False):
     selftest=True 供 headless 自检:自动滚底驱动分页并打印进度,渲完自毁,不影响正常使用。"""
 
     def _win():
+        global _lib_root
         try:
             import tkinter as tk
             from tkinter import ttk
             root = tk.Tk()
             root.title("K歌曲库管理")
             root.geometry("720x500")
+            _lib_root = root
+            if not selftest:
+                refresh_tray()         # 反映"已打开"的托盘勾选(selftest 不碰托盘)
             root.attributes("-topmost", True)
 
             top = tk.Frame(root)
@@ -2357,6 +2404,10 @@ def _open_library_browser(selftest=False):
             root.mainloop()
         except Exception as ex:
             print(f"[LIB] 曲库管理窗失败: {ex}")
+        finally:
+            _lib_root = None           # 关窗 → 去托盘勾选
+            if not selftest:
+                refresh_tray()
 
     threading.Thread(target=_tk_window_thread(_win), daemon=True).start()
 
@@ -2537,11 +2588,8 @@ def run_tray(url):
     def on_toggle_karaoke(icon, item):
         toggle_player()
 
-    def on_open_library(icon, item):
-        _open_library_browser()        # 打开曲库管理窗(倒序列表 + 搜索 + 编辑)
-
-    def on_open_scan(icon, item):
-        _open_scan_window()            # 扫描导入窗(PC+手机双端扫描 → 多选编辑入库)
+    def on_toggle_studio(icon, item):
+        _toggle_studio_visible()       # Studio One 显隐(与 App 同步,见 _toggle_studio_visible)
 
     def on_edit_performer(icon, item):
         _open_performer_dialog()       # 编辑演唱者(主播名,开头标题卡用)
@@ -2553,13 +2601,18 @@ def run_tray(url):
         pystray.MenuItem(
             lambda i: f"Studio One MIDI: {'已连接' if STATE['studio_connected'] else '未连接'}",
             None, enabled=False),
-        # 曲库:可点击 → 曲库管理窗(倒序/搜索/编辑歌名歌手)
-        pystray.MenuItem(lambda i: f"曲库: {STATE['lib_count']} 首 — 点击管理", on_open_library),
-        # 扫描导入:PC 缓存 + 手机全民K歌双端扫描,去重后多选编辑入库
-        pystray.MenuItem("扫描导入歌曲", on_open_scan),
+        # 曲库:勾选式开关——打开=打钩、关闭=去钩,开着再点即关窗(单实例,不重复开)
+        pystray.MenuItem(lambda i: f"曲库: {STATE['lib_count']} 首 — 点击管理", _toggle_library_window,
+                         checked=lambda i: _lib_root is not None),
+        # 扫描导入:同款勾选式开关
+        pystray.MenuItem("扫描导入歌曲", _toggle_scan_window,
+                         checked=lambda i: _scan_root is not None),
         # 演唱者(主播名):点击编辑,开头标题卡"演唱:<名>"用
         pystray.MenuItem(lambda i: f"演唱者：{STATE.get('performer', '八门官上')}", on_edit_performer),
         pystray.Menu.SEPARATOR,
+        # Studio One 显隐:勾选=当前显示;与 App 的显隐开关双向同步(见 _toggle_studio_visible)
+        pystray.MenuItem("Studio One 显示", on_toggle_studio,
+                         checked=lambda i: STATE.get("studio_visible", True)),
         pystray.MenuItem(
             "K歌歌词", on_toggle_karaoke,
             checked=lambda i: STATE["player_visible"]),   # 用权威状态(player 经VIS上报),不重读win32免竞态

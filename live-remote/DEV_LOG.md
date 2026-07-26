@@ -898,3 +898,10 @@ vkey 授权流按连接限速**(单连接~210KB/s≈5倍实时码率,"够流畅�
 - **人声分离加进度条(2026-07-26)**:`separate_accompaniment` 改 `Popen` 实时读 demucs stderr,正则解析 tqdm 的
   `NN%`(`read1` 流式、按 `\r/\n` 切段)→ `pct_cb('分离伴奏', pct)`,串进 `prepare` 的 `pct_cb` → QQ 页签同一条进度条
   (`qst["dl_pct"]`)。实测分离 0→100% 逐档上报(模型已缓存后 56s 片段 CPU 仅 20s)。
+- **托盘窗口改勾选式单实例开关 + Studio One 显隐进托盘(2026-07-26)**:曲库/扫描导入托盘项原是"每点开一个新窗"
+  (能重复开、无勾选)。改成像「K歌歌词」的**勾选式开关**:模块级 `_lib_root`/`_scan_root` 记窗口 Tk 根(`_win` 建根时
+  set+`refresh_tray`、finally 清+`refresh_tray`);`_toggle_library_window`/`_toggle_scan_window`——未开→开、已开→
+  `root.after(0, root.destroy)` 关窗(单实例,不重复开);`checked=lambda i: _lib_root is not None`。新增托盘 **`Studio One 显示`**
+  勾选项(`checked=studio_visible`)。**Studio One 显隐托盘↔App 双向同步**:抽出 `_toggle_studio_visible`(show/hide+存盘+
+  `refresh_tray`+`_threadsafe_broadcast`),托盘项与 App 的 `studio_toggle` 命令共用它——App 切时刷托盘勾选、托盘切时推 App。
+  隔离测:曲库/扫描 toggle 开设关清、Studio toggle True↔False 不崩、pystray 动态文本+勾选项可构建。
