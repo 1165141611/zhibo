@@ -887,3 +887,14 @@ vkey 授权流按连接限速**(单连接~210KB/s≈5倍实时码率,"够流畅�
   **二次确认**(不可恢复)→ `_lib_delete(mid)`:先 `set_setlist_member(mid,False)` 出歌单、从 `_queue` 摘除并 `_sync_queue_state`,
   再 `library.delete(mid)`(删 `KaraokeLibrary/<mid>/` 整个四件套+meta + 清 `_MANIFEST`/library.json + `_on_lib_change` 刷托盘/推库)。
   正在唱的歌已载进播放器内存,删文件不影响当前这遍。`library.delete` 用假 mid 隔离测过(目录/清单清掉、真库数不变)。
+- **曲库窗打开崩溃闪退根治(2026-07-26)**:Windows 事件日志实锤——`python.exe` 崩在 **`tcl86t.dll` 异常码
+  `0x80000003`(Tcl_Panic)**,今天崩多次。根因是**多线程 tkinter**:曲库/扫描/改名窗各在自己后台线程跑独立 Tk 根,
+  而 Python 循环 GC 会在**任意线程**触发,一旦在非 Tk 线程 finalize 窗口里的 tk 对象(曲库窗建 100+ `BooleanVar`、
+  QQ 页签的 `PhotoImage`)就从错误线程调 Tcl → 硬崩溃(故单开曲库窗不崩、一进多线程服务里必崩,日志里那串
+  "Variable.__del__ main thread is not in main loop" 只是被守卫忽略的表征)。**修法(threaded-tkinter 通用)**:
+  新增 `_tk_gc_enter/exit`(引用计数)+ `_tk_window_thread(fn)` 包住所有 Tk 窗口线程——**任一窗口开着就 `gc.disable()`**、
+  全关了才 `gc.enable()`;窗口线程退出时先在**本 Tk 线程**上 `gc.collect()` 就地回收本窗 tk 循环(其 __del__ 在自己线程
+  有 _tkinter 守卫、不崩),不留给后台线程回收。实测:开窗后 `gc.isenabled()=False`、反复开关无异常。
+- **人声分离加进度条(2026-07-26)**:`separate_accompaniment` 改 `Popen` 实时读 demucs stderr,正则解析 tqdm 的
+  `NN%`(`read1` 流式、按 `\r/\n` 切段)→ `pct_cb('分离伴奏', pct)`,串进 `prepare` 的 `pct_cb` → QQ 页签同一条进度条
+  (`qst["dl_pct"]`)。实测分离 0→100% 逐档上报(模型已缓存后 56s 片段 CPU 仅 20s)。

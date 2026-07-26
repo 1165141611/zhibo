@@ -22,6 +22,7 @@ import asyncio
 import threading
 import subprocess
 import warnings
+import gc
 import concurrent.futures
 
 warnings.filterwarnings("ignore")  # 屏蔽 pycaw 对未接入设备的无害 COMError 警告
@@ -68,6 +69,49 @@ from fastapi.responses import JSONResponse
 import config
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# ── 多线程 tkinter 防崩:Tk 窗口开着期间禁用 GC ──────────────────────────
+# 本服务的 Tk 窗口(曲库管理/扫描导入/改名)各在**自己的后台线程**跑独立 Tk 根。Python 的循环 GC
+# 会在**任意线程**触发,一旦在非 Tk 线程去 finalize 窗口里的 tk 对象(BooleanVar/PhotoImage 等),
+# 就从错误线程调 Tcl → `tcl86t.dll` **Tcl_Panic(0x80000003)硬崩溃闪退**(曲库窗建 100+ BooleanVar
+# 最易触发:单开不崩、多线程服务里必崩)。**修法(业界通用)**:窗口开着就禁 GC,全关了再恢复。
+# 引用计数守卫支持多窗口同时开;`_tk_window_thread(fn)` 把窗口线程体一包即可。
+_tk_gc_lock = threading.Lock()
+_tk_gc_depth = 0
+
+
+def _tk_gc_enter():
+    global _tk_gc_depth
+    with _tk_gc_lock:
+        if _tk_gc_depth == 0:
+            gc.disable()
+        _tk_gc_depth += 1
+
+
+def _tk_gc_exit():
+    global _tk_gc_depth
+    with _tk_gc_lock:
+        _tk_gc_depth = max(0, _tk_gc_depth - 1)
+        if _tk_gc_depth == 0:
+            gc.enable()
+
+
+def _tk_window_thread(fn):
+    """把一个建/跑 Tk 根的函数包成守卫线程体:进禁 GC、退恢复(引用计数,多窗口安全)。
+    退出时先**在本 Tk 线程上** `gc.collect()`——本窗遗留的 tk 循环在自己线程回收(其 __del__ 有
+    _tkinter 的线程守卫、只抛被忽略的 RuntimeError,不会 Tcl_Panic),不留给后台线程去回收(那才会崩)。"""
+    def _runner():
+        _tk_gc_enter()
+        try:
+            fn()
+        finally:
+            try:
+                gc.collect()          # 显式 collect 无视 disable;就地清掉本窗 tk 循环
+            except Exception:
+                pass
+            _tk_gc_exit()
+    return _runner
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # pythonw(无窗口)下 sys.stdout/stderr 为 None,print 和 uvicorn 日志会报错导致后台线程起不来。
@@ -1391,7 +1435,7 @@ def _open_rename_dialog(mid):
         except Exception as ex:
             print(f"[LIB] 改名对话框失败: {ex}")
 
-    threading.Thread(target=_dlg, daemon=True).start()
+    threading.Thread(target=_tk_window_thread(_dlg), daemon=True).start()
 
 
 def _open_performer_dialog():
@@ -1430,7 +1474,7 @@ def _open_performer_dialog():
         except Exception as ex:
             print(f"[PERF] 演唱者对话框失败: {ex}")
 
-    threading.Thread(target=_dlg, daemon=True).start()
+    threading.Thread(target=_tk_window_thread(_dlg), daemon=True).start()
 
 
 def _fmt_key(k):
@@ -2027,7 +2071,7 @@ def _open_scan_window():
         root.after(120, root.focus_force)
         root.mainloop()
 
-    threading.Thread(target=_win, daemon=True).start()
+    threading.Thread(target=_tk_window_thread(_win), daemon=True).start()
 
 
 def _open_library_browser(selftest=False):
@@ -2314,7 +2358,7 @@ def _open_library_browser(selftest=False):
         except Exception as ex:
             print(f"[LIB] 曲库管理窗失败: {ex}")
 
-    threading.Thread(target=_win, daemon=True).start()
+    threading.Thread(target=_tk_window_thread(_win), daemon=True).start()
 
 
 # ── K歌:发指令给播放器 + 点歌队列 ──────────────────────

@@ -343,13 +343,14 @@ def separation_available():
         return False
 
 
-def separate_accompaniment(pcm_int16, progress_cb=None):
+def separate_accompaniment(pcm_int16, progress_cb=None, pct_cb=None):
     """用 **Demucs**(htdemucs,--two-stems vocals)从原唱 int16 立体声分离出**伴奏**(no_vocals)。
     以子进程跑(torch 不常驻 pc-service;有 CUDA 自动用 GPU)。返回 int16 立体声 (N,2)。
+    进度:实时解析 demucs stderr 的 tqdm 百分比,经 pct_cb('分离伴奏', pct) 回调驱动进度条。
     仅在 separation_available() 为真时被 prepare 调用。"""
-    import subprocess, tempfile, wave, shutil
+    import subprocess, tempfile, wave, shutil, re
     if progress_cb:
-        progress_cb("人声分离出伴奏(Demucs;GPU~15-30s / CPU 数分钟,请稍候)…")
+        progress_cb("人声分离出伴奏(Demucs;GPU~15-30s / CPU 数分钟)")
     work = tempfile.mkdtemp(prefix="qqsep_")
     try:
         in_wav = os.path.join(work, "in.wav")
@@ -357,17 +358,36 @@ def separate_accompaniment(pcm_int16, progress_cb=None):
             w.setnchannels(CHANNELS); w.setsampwidth(2); w.setframerate(SAMPLE_RATE)
             w.writeframes(np.ascontiguousarray(pcm_int16).tobytes())
         outdir = os.path.join(work, "out")
-        env = dict(os.environ, PYTHONIOENCODING="utf-8")
-        p = subprocess.run(
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", COLUMNS="80")
+        proc = subprocess.Popen(
             [config.PLAYER_PYTHON, "-m", "demucs", "--two-stems", "vocals",
              "-n", "htdemucs", "-o", outdir, in_wav],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             creationflags=_NO_WINDOW, env=env)
-        if p.returncode != 0:
-            raise RuntimeError("Demucs 分离失败: " + (p.stderr or p.stdout or "")[-300:])
+        # demucs 用 tqdm 往 stderr 打进度条(\r 刷新);实时解析 `NN%` 报给进度条
+        pat = re.compile(rb"(\d+)%")
+        buf = bytearray(); last = -1
+        while True:
+            chunk = proc.stderr.read1(4096)
+            if not chunk:
+                break
+            buf += chunk
+            segs = re.split(rb"[\r\n]", buf)
+            buf = bytearray(segs[-1])                # 留下不完整的尾段
+            for seg in segs[:-1]:
+                m = pat.search(seg)
+                if m and pct_cb:
+                    p = min(100, int(m.group(1)))
+                    if p != last:
+                        pct_cb("分离伴奏", p); last = p
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError("Demucs 分离失败(退出码 %d)" % proc.returncode)
         nv = os.path.join(outdir, "htdemucs", "in", "no_vocals.wav")
         if not os.path.isfile(nv):
             raise RuntimeError("Demucs 未产出 no_vocals.wav")
+        if pct_cb:
+            pct_cb("分离伴奏", 100)
         return _audio_to_pcm_int16(open(nv, "rb").read(), ".wav")
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -421,8 +441,7 @@ def prepare(cand, progress_cb=None, preview=False, pct_cb=None):
         if acc_pcm is not None:
             accompany = acc_pcm                       # QQ 官方伴奏 stem,最佳
         elif separation_available() and orig_pcm is not None:
-            prog("人声分离出伴奏(GPU)…")
-            accompany = separate_accompaniment(orig_pcm, progress_cb=progress_cb)
+            accompany = separate_accompaniment(orig_pcm, progress_cb=progress_cb, pct_cb=pct_cb)
         else:
             accompany = orig_pcm                       # 无伴奏也没装分离:两轨都用原唱
 
