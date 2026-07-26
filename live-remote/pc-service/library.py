@@ -222,16 +222,30 @@ def scan_pc():
     for mid in entries:
         if not os.path.isdir(os.path.join(config.WESING_RES_DIR, mid)):
             continue
-        if _already(_MANIFEST, mid) or not _complete(config.WESING_RES_DIR, mid):
+        if not _complete(config.WESING_RES_DIR, mid):     # 四件套不全 → 无法导入,跳过
             continue
+        already = _already(_MANIFEST, mid)                # 已入库:仍列出但标 in_library(UI 置灰禁选)
         try:
             meta = _qrc_meta(os.path.join(config.WESING_RES_DIR, mid, mid + ".qrc"))
         except Exception as e:
-            print(f"[LIB] 跳过 {mid}(QRC 解析失败): {e}")
-            continue
+            if not already:
+                print(f"[LIB] 跳过 {mid}(QRC 解析失败): {e}")
+                continue
+            meta = {"title": "", "artist": "", "needs_name": False}  # 已入库解析失败也照列(用库里名)
+        if already:                                       # 已入库标题/歌手优先用库里存的(清洗+改名后)
+            ent = _MANIFEST.get(mid, {})
+            title = (ent.get("title") or meta["title"] or mid)
+            artist = ent.get("artist", meta["artist"])
+        else:
+            title, artist = meta["title"], meta["artist"]
+        try:
+            mtime = os.path.getmtime(os.path.join(config.WESING_RES_DIR, mid))   # 缓存时间(排序用)
+        except OSError:
+            mtime = 0
         cands.append({"mid": mid, "source": "PC", "src_root": config.WESING_RES_DIR,
-                      "title": meta["title"], "artist": meta["artist"],
-                      "needs_name": meta["needs_name"]})
+                      "title": title, "artist": artist,
+                      "needs_name": (meta["needs_name"] and not already),
+                      "in_library": already, "mtime": mtime})
     return cands
 
 

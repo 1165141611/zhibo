@@ -186,8 +186,9 @@ def _song_mid(qrc_name):
 
 
 def scan_phone(serial, progress_cb=None, on_candidate=None, known_mids=None):
-    """扫手机、拉取、转换,返回库里没有的新歌候选。serial 必填(由扫描窗口从 list_devices 选)。
-    on_candidate(cand):每转换好一首**立即**回调一次(供 UI 扫出一首显示一首),函数末尾仍返回全部。"""
+    """扫手机 → 候选列表(**只拉小 qrc 取歌名,快**;音频解密转码推迟到入库/试听 `convert_phone_song`)。
+    serial 必填。返回:已入库(in_library,不拉取)+ 新歌(needs_convert,带 phone 文件引用)。
+    on_candidate(cand):扫出一首**立即**回调(UI 增量显示),函数末尾仍返回全部。"""
     def prog(msg):
         if progress_cb:
             progress_cb(msg)
@@ -219,9 +220,18 @@ def scan_phone(serial, progress_cb=None, on_candidate=None, known_mids=None):
         if abs(song_mt[mid] - tmt) <= config.MOBILE_TKM_WINDOW:
             tkm_by_song.setdefault(mid, []).append((tname, tmt))
 
+    lib_meta = library.manifest()             # 已入库歌用库里存的标题/歌手显示(不拉取/转换)
+    cands = []
     todo = []
     for mid, qmt in song_mt.items():
-        if mid in known:
+        if mid in known:                      # 已入库:直接列出(标 in_library,UI 置灰禁选),不拉取/转换
+            ent = lib_meta.get(mid, {})
+            cand = {"mid": mid, "source": "手机", "src_root": config.MOBILE_STAGING_DIR,
+                    "title": (ent.get("title") or mid), "artist": ent.get("artist", ""),
+                    "needs_name": False, "in_library": True, "mtime": qmt}
+            cands.append(cand)
+            if on_candidate:
+                on_candidate(cand)
             continue
         if (mid + ".oke") not in notes:
             prog("跳过 %s(无音高数据)" % mid)
@@ -234,33 +244,57 @@ def scan_phone(serial, progress_cb=None, on_candidate=None, known_mids=None):
         todo.append((mid, song_qname[mid], mid + ".oke", chosen))
 
     if not todo:
-        prog("没有库里缺的新歌")
-        return []
+        prog("没有可导入的新歌(其余已入库)" if cands else "没有库里缺的新歌")
+        return cands
 
+    # **列表阶段只拉小小的 qrc 取歌名/歌手(轻、快、增量显示);音频解密转码(拉几MB tkm + ffmpeg 解码
+    # 整首 + 写~100MB PCM,才是耗时大头)**推迟到真正入库/试听时(convert_phone_song)**才做。
     os.makedirs(config.MOBILE_STAGING_DIR, exist_ok=True)
-    cands = []
+    raw_dir = os.path.join(config.MOBILE_STAGING_DIR, "_raw")
+    os.makedirs(raw_dir, exist_ok=True)
     for i, (mid, qname, nname, tkm_names) in enumerate(todo):
-        prog("转换 %d/%d:%s" % (i + 1, len(todo), mid))
-        raw = os.path.join(config.MOBILE_STAGING_DIR, "_raw", mid)
-        os.makedirs(raw, exist_ok=True)
+        prog("读取新歌 %d/%d…" % (i + 1, len(todo)))
         try:
-            qrc_l = os.path.join(raw, "q.qrc")
-            oke_l = os.path.join(raw, "n.oke")
+            qrc_l = os.path.join(raw_dir, mid + "_meta.qrc")
             _pull(serial, config.MOBILE_FILES + "/qrc/" + qname, qrc_l)
-            _pull(serial, config.MOBILE_FILES + "/note/" + nname, oke_l)
-            tkm_ls = []
-            for j, tn in enumerate(tkm_names):
-                tp = os.path.join(raw, "t%d.tkm" % j)
-                _pull(serial, config.MOBILE_FILES + "/obbligato/" + tn, tp)
-                tkm_ls.append(tp)
-            _run_convert(mid, config.MOBILE_STAGING_DIR, qrc_l, oke_l, tkm_ls, progress_cb)
-            meta = library._qrc_meta(os.path.join(config.MOBILE_STAGING_DIR, mid, mid + ".qrc"))
-            cand = {"mid": mid, "source": "手机", "src_root": config.MOBILE_STAGING_DIR,
-                    "title": meta["title"], "artist": meta["artist"],
-                    "needs_name": meta["needs_name"]}
-            cands.append(cand)
-            if on_candidate:
-                on_candidate(cand)                 # 扫出一首立即回调 → UI 增量显示
+            meta = library._qrc_meta(qrc_l)
         except Exception as e:
-            prog("× %s 失败:%s" % (mid, e))
+            prog("× %s 读信息失败:%s" % (mid, e))
+            meta = {"title": mid, "artist": "", "needs_name": True}
+        cand = {"mid": mid, "source": "手机", "src_root": config.MOBILE_STAGING_DIR,
+                "title": meta["title"], "artist": meta["artist"],
+                "needs_name": meta["needs_name"], "in_library": False,
+                "mtime": song_mt.get(mid, 0),      # qrc 缓存时间(排序用)
+                "needs_convert": True,             # 音频尚未解密转码,入库/试听时才做
+                "phone": {"serial": serial, "qname": qname,
+                          "oke": nname, "tkms": list(tkm_names)}}
+        cands.append(cand)
+        if on_candidate:
+            on_candidate(cand)                     # 扫出一首立即显示(只拉了 qrc,秒级)
     return cands
+
+
+def convert_phone_song(cand, progress_cb=None):
+    """**入库/试听时才调**:把一首手机歌的音频解密转码成 PC 四件套到暂存(重活,从原 scan_phone 拆出)。
+    cand['phone']={serial,qname,oke,tkms};完成后 MOBILE_STAGING_DIR/<mid>/ 满足 import_candidate/试听 契约。
+    已转换过则直接复用(试听后再入库不重复转)。"""
+    ph = cand.get("phone") or {}
+    serial, mid = ph.get("serial"), cand["mid"]
+    if not serial:
+        raise RuntimeError("缺少手机设备信息,无法转换(请重新扫描)")
+    dst = os.path.join(config.MOBILE_STAGING_DIR, mid)
+    if os.path.isfile(os.path.join(dst, mid + "_accompany.pcm")):
+        return                                     # 已转换(试听→入库复用)
+    os.makedirs(config.MOBILE_STAGING_DIR, exist_ok=True)
+    raw = os.path.join(config.MOBILE_STAGING_DIR, "_raw", mid)
+    os.makedirs(raw, exist_ok=True)
+    qrc_l = os.path.join(raw, "q.qrc")
+    oke_l = os.path.join(raw, "n.oke")
+    _pull(serial, config.MOBILE_FILES + "/qrc/" + ph["qname"], qrc_l)
+    _pull(serial, config.MOBILE_FILES + "/note/" + ph["oke"], oke_l)
+    tkm_ls = []
+    for j, tn in enumerate(ph["tkms"]):
+        tp = os.path.join(raw, "t%d.tkm" % j)
+        _pull(serial, config.MOBILE_FILES + "/obbligato/" + tn, tp)
+        tkm_ls.append(tp)
+    _run_convert(mid, config.MOBILE_STAGING_DIR, qrc_l, oke_l, tkm_ls, progress_cb)

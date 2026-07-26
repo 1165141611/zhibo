@@ -186,10 +186,16 @@ _midi_in = None
 # (**不发 MIDI**,记录=现实即可继续准确切换);k_vol 恢复后在拉起播放器时下发一次。
 PERSIST_PATH = os.path.join(BASE_DIR, "state_cache.json")
 _persist_lock = threading.Lock()
+# 只有走过启动 _restore_persist(把真实状态载入 STATE)之后才允许写盘。防"某进程 import server 后
+# 在默认空 STATE 上调到 _save_persist(如测试调 _toggle_studio_visible / set_setlist_member)→
+# 用默认空值覆盖掉用户真实 state_cache.json(曾把 setlist 清空)"。生产 main() 必先 _restore_persist。
+_persist_ready = False
 
 
 def _save_persist():
     """把需继承的状态写盘(整写小 JSON,先写临时文件再原子替换;失败只打日志不影响运行)。"""
+    if not _persist_ready:           # 未经启动恢复就别写盘(防默认空 STATE 覆盖真实缓存)
+        return
     try:
         with _persist_lock:
             data = {
@@ -216,6 +222,8 @@ def _save_persist():
 
 def _restore_persist():
     """启动时恢复上次的场景/静音记录/演唱音量(文件缺失或损坏则保持默认)。"""
+    global _persist_ready
+    _persist_ready = True            # 走过恢复流程(哪怕文件缺失=首次运行),之后才允许写盘
     try:
         with open(PERSIST_PATH, encoding="utf-8") as f:
             data = json.load(f)
@@ -1539,7 +1547,7 @@ def _open_pair_dialog(parent, on_connected):
 
     img = qrcode.make(data)
     pil = (img.get_image() if hasattr(img, "get_image") else img).resize((240, 240))
-    photo = ImageTk.PhotoImage(pil)
+    photo = ImageTk.PhotoImage(pil, master=dlg)   # master=dlg 防多窗口时绑错解释器(二维码不显示)
     lbl_img = tk.Label(dlg, image=photo); lbl_img.image = photo   # 保引用防 GC
     lbl_img.pack(padx=18, pady=(16, 6))
     tk.Label(dlg, text="配对码:%s" % code, fg="#888888").pack()
@@ -1631,12 +1639,12 @@ def _open_scan_window():
         qqf = tk.Frame(nb); nb.add(qqf, text="QQ（无音准）")
 
         st = {"phase": "idle", "msg": "", "results": None, "error": None,
-              "gen": 0, "serial": None, "import_done": None}
+              "gen": 0, "serial": None, "import_done": None, "op_msg": None}
         dev_map = {}   # 下拉显示名 -> serial
 
         # ============ K歌页签:扫描来源(电脑/手机 二选一)+ 设备 + 重新扫描 ============
         # 一次只扫一端,避免两端数据互相干扰。
-        scan_mode = tk.StringVar(value="pc")
+        scan_mode = tk.StringVar(master=root, value="pc")
         top = tk.Frame(kge); top.pack(fill="x", padx=10, pady=(10, 2))
         tk.Label(top, text="扫描来源:").pack(side="left")
         tk.Radiobutton(top, text="电脑缓存", variable=scan_mode, value="pc",
@@ -1644,10 +1652,14 @@ def _open_scan_window():
         tk.Radiobutton(top, text="手机全民K歌", variable=scan_mode, value="phone",
                        command=lambda: _on_mode()).pack(side="left", padx=(0, 8))
         rescan_btn = tk.Button(top, text="重新扫描"); rescan_btn.pack(side="right")
+        # 检索框:短、置于「重新扫描」左侧同一行(过滤扫描结果;结果按缓存时间倒序)
+        search_var = tk.StringVar(master=root)
+        tk.Entry(top, textvariable=search_var, width=16).pack(side="right", padx=(0, 6))
+        tk.Label(top, text="检索:").pack(side="right")
 
         top2 = tk.Frame(kge); top2.pack(fill="x", padx=10, pady=(0, 4))
         dev_lbl = tk.Label(top2, text="手机设备:"); dev_lbl.pack(side="left")
-        dev_var = tk.StringVar()
+        dev_var = tk.StringVar(master=root)
         dev_cb = ttk.Combobox(top2, textvariable=dev_var, state="readonly", width=26)
         dev_cb.pack(side="left", padx=6)
         pair_btn = tk.Button(top2, text="📶 扫码连接",
@@ -1693,7 +1705,9 @@ def _open_scan_window():
 
         def _set_all(v):
             for r in rows:
-                r["chk"].set(v)
+                # 已入库禁选跳过;只对当前检索可见的行生效(全选=选中你看到的)
+                if not r.get("in_library") and r["rf"].winfo_ismapped():
+                    r["chk"].set(v)
         tk.Button(bar, text="全选", width=6, command=lambda: _set_all(True)).pack(side="left")
         tk.Button(bar, text="全不选", width=7, command=lambda: _set_all(False)).pack(side="left", padx=4)
         confirm_btn = tk.Button(bar, text="确认入库"); confirm_btn.pack(side="right")
@@ -1712,17 +1726,39 @@ def _open_scan_window():
                 w.destroy()
             rows.clear()
 
+        def _preview_kge(cand):
+            """K歌试听:手机新歌先解密转码(needs_convert)再播;PC/已转换的直接 _preview。
+            转好后清 needs_convert,之后入库/再试听直接复用暂存。"""
+            if not cand.get("needs_convert"):
+                _preview(cand); return
+
+            def _work():
+                try:
+                    st["op_msg"] = "试听:解密转码 " + (cand.get("title") or cand["mid"]) + "…"
+                    mobile_import.convert_phone_song(
+                        cand, progress_cb=lambda m: st.update(op_msg="试听转码 · " + m.strip()))
+                    cand["needs_convert"] = False
+                    _preview(cand)
+                    st["op_msg"] = "试听中(伴奏,系统默认输出、不进直播)。"
+                except Exception as e:
+                    st["op_msg"] = "试听失败:%s" % e
+            threading.Thread(target=_work, daemon=True).start()
+
         def _add_row(cand, idx):
             base = C_EVEN if idx % 2 == 0 else C_ODD
+            in_lib = cand.get("in_library")
             rf = tk.Frame(inner, bg=base); rf.pack(fill="x")
             rf.columnconfigure(1, weight=1, minsize=150)
-            chk = tk.BooleanVar(value=False)         # 默认全不选,主动勾选要导入的
-            tk.Checkbutton(rf, variable=chk, bg=base, activebackground=base).grid(row=0, column=0, padx=(6, 2))
+            chk = tk.BooleanVar(master=root, value=False)   # 默认全不选;master=root 防多窗口串解释器
+            cb = tk.Checkbutton(rf, variable=chk, bg=base, activebackground=base)
+            if in_lib:
+                cb.config(state="disabled")          # 已入库:禁止勾选
+            cb.grid(row=0, column=0, padx=(6, 2))
             e_t = tk.Entry(rf, width=24)
             title = (cand.get("title") or "").strip()
             if title:
                 e_t.insert(0, title)
-            else:                                  # 空标题(待命名):灰红占位,别显示成空白行
+            elif not in_lib:                       # 空标题(待命名):灰红占位(已入库有库里名,不会走这)
                 e_t.insert(0, _TITLE_PH); e_t.config(fg="#c0392b"); e_t._ph = _TITLE_PH
 
                 def _clear_ph(ev, w=e_t):          # 点击/聚焦即清占位,可直接输入
@@ -1733,16 +1769,57 @@ def _open_scan_window():
             e_a = tk.Entry(rf, width=12)
             e_a.insert(0, cand.get("artist") or "")
             e_a.grid(row=0, column=2, padx=2)
-            tk.Label(rf, text=cand["source"], bg=base, fg="#888888", width=4).grid(row=0, column=3, padx=(2, 8))
-            tk.Button(rf, text="▶ 试听", command=lambda c=cand: _preview(c)).grid(row=0, column=4, padx=(2, 6))
+            if in_lib:                             # 已入库:置灰、禁编辑、标"已入库"、无试听
+                e_t.config(state="disabled", disabledforeground="#9aa0a6")
+                e_a.config(state="disabled", disabledforeground="#9aa0a6")
+                tk.Label(rf, text="已入库", bg=base, fg="#9aa0a6", width=6).grid(row=0, column=3, padx=(2, 8))
+            else:
+                tk.Label(rf, text=cand["source"], bg=base, fg="#888888", width=4).grid(row=0, column=3, padx=(2, 8))
+                tk.Button(rf, text="▶ 试听", command=lambda c=cand: _preview_kge(c)).grid(row=0, column=4, padx=(2, 6))
             # 伴奏/原唱结构固定、自动判别即准,不提供交换按钮(确认一次即可)。
-            rows.append({"cand": cand, "chk": chk, "e_title": e_t, "e_artist": e_a})
+            rows.append({"cand": cand, "chk": chk, "e_title": e_t, "e_artist": e_a,
+                         "in_library": in_lib, "rf": rf})
+
+        def _match(r, kw):
+            return (not kw) or (kw in (r["e_title"].get() or "").lower()
+                                or kw in (r["e_artist"].get() or "").lower())
+
+        def _apply_filter(*_):
+            """检索:隐藏不匹配的行、按行序重排可见行(保留勾选/改名,不重建行)。"""
+            kw = search_var.get().strip().lower()
+            for r in rows:
+                r["rf"].pack_forget()
+            for r in rows:                          # rows 已是排序后的顺序,依序 pack 保持有序
+                if _match(r, kw):
+                    r["rf"].pack(fill="x")
+
+        def _resort_render():
+            """扫描完成后:按缓存时间**倒序**(mtime desc)重排全部结果重渲,再套用当前检索。"""
+            _clear_rows()
+            items = sorted(st["results"] or [], key=lambda c: c.get("mtime", 0), reverse=True)
+            for i, c in enumerate(items):
+                _add_row(c, i)
+            _apply_filter()
 
         def _render_new():
-            """增量渲染:把 results 里比已渲染行多出来的部分追加成行(扫出一首显示一首)。"""
+            """扫描进行中的增量渲染(扫出一首显示一首,暂按扫描顺序;完成时 _resort_render 再按时间倒序)。"""
             results = st["results"] or []
+            kw = search_var.get().strip().lower()
             for i in range(len(rows), len(results)):
                 _add_row(results[i], i)
+                if kw and not _match(rows[-1], kw):   # 有检索词时新行不匹配即隐藏
+                    rows[-1]["rf"].pack_forget()
+
+        _filt_deb = {"id": None}
+
+        def _on_search(*_):
+            if _filt_deb["id"]:
+                try:
+                    root.after_cancel(_filt_deb["id"])
+                except Exception:
+                    pass
+            _filt_deb["id"] = root.after(200, _apply_filter)   # 200ms 防抖
+        search_var.trace_add("write", _on_search)
 
         # ---- 扫描 worker(**只扫选中的那一端**;手机侧慢:adb 拉取 + ffmpeg 转换,边转边显示)----
         def _do_scan(gen, serial, mode):
@@ -1788,20 +1865,25 @@ def _open_scan_window():
             elif st["phase"] == "done":
                 prog.stop(); prog.pack_forget()
                 confirm_btn.config(state="normal"); rescan_btn.config(state="normal")
+                _resort_render()                     # 扫完按缓存时间倒序重排 + 套用检索
                 if st["error"]:
                     status_lbl.config(text="⚠ 扫描失败:%s%s" % (
                         st["error"], "(已列出已转换的)" if n else ""), fg="#c0392b")
                 elif n:
-                    status_lbl.config(text="扫描到 %d 首库里没有的新歌;勾选要导入的,可改歌名/原唱,确认入库。" % n,
-                                      fg="#666666")
+                    new_n = sum(1 for c in (st["results"] or []) if not c.get("in_library"))
+                    status_lbl.config(
+                        text="扫描到 %d 首(灰色=已入库,%d 首新歌);勾选要导入的,可改歌名/原唱,确认入库。" % (n, new_n),
+                        fg="#666666")
                 else:
-                    status_lbl.config(text="没有库里缺的新歌。", fg="#666666")
+                    status_lbl.config(text="没扫到歌。", fg="#666666")
                 st["phase"] = "idle"
+            elif st.get("op_msg"):                   # 入库/试听的转换进度(手机音频延迟转码)
+                status_lbl.config(text=st["op_msg"], fg="#666666")
             root.after(150, _poll)
 
         # ---- 确认入库(后台线程做拷贝,完成后关窗)----
         def _confirm():
-            picked = [r for r in rows if r["chk"].get()]
+            picked = [r for r in rows if r["chk"].get() and not r.get("in_library")]
             if not picked:
                 root.destroy(); return
             confirm_btn.config(state="disabled"); rescan_btn.config(state="disabled")
@@ -1810,17 +1892,25 @@ def _open_scan_window():
 
             def _work():
                 n = 0
-                for r in picked:
+                for i, r in enumerate(picked):
+                    cand = r["cand"]
+                    head = "入库 %d/%d:%s " % (i + 1, len(picked), _row_title(r) or cand["mid"])
                     try:
-                        library.import_candidate(r["cand"], _row_title(r),
-                                                 r["e_artist"].get())
+                        if cand.get("needs_convert"):   # 手机新歌:入库时才解密转码(重活)
+                            st["op_msg"] = head + "解密转码中…"
+                            mobile_import.convert_phone_song(
+                                cand, progress_cb=lambda m, h=head: st.update(op_msg=h + m.strip()))
+                        else:
+                            st["op_msg"] = head
+                        library.import_candidate(cand, _row_title(r), r["e_artist"].get())
                         n += 1
                     except Exception as e:
-                        print("[SCAN] 入库失败 %s: %s" % (r["cand"]["mid"], e))
+                        print("[SCAN] 入库失败 %s: %s" % (cand["mid"], e))
                 try:
                     _on_lib_change()               # 刷托盘 + 推手机 + 推歌单
                 except Exception:
                     pass
+                st["op_msg"] = None
                 st["import_done"] = n
             threading.Thread(target=_work, daemon=True).start()
 
@@ -1877,7 +1967,7 @@ def _open_scan_window():
         qtype.set("QQ")
         qlogin_btn = tk.Button(qtop, text="登录")
         qlogout_btn = tk.Button(qtop, text="退出登录")
-        qsearch_var = tk.StringVar()
+        qsearch_var = tk.StringVar(master=root)
         qsearch_entry = tk.Entry(qtop, textvariable=qsearch_var, width=20)
         qsearch_btn = tk.Button(qtop, text="搜索")
 
@@ -1904,9 +1994,9 @@ def _open_scan_window():
 
         qbar = tk.Frame(qqf); qbar.pack(fill="x", padx=10, pady=(2, 10))
         tk.Button(qbar, text="全选", width=6,
-                  command=lambda: [r["chk"].set(True) for r in qrows]).pack(side="left")
+                  command=lambda: [r["chk"].set(True) for r in qrows if not r.get("in_library")]).pack(side="left")
         tk.Button(qbar, text="全不选", width=7,
-                  command=lambda: [r["chk"].set(False) for r in qrows]).pack(side="left", padx=4)
+                  command=lambda: [r["chk"].set(False) for r in qrows if not r.get("in_library")]).pack(side="left", padx=4)
         qconfirm_btn = tk.Button(qbar, text="确认入库"); qconfirm_btn.pack(side="right")
         tk.Button(qbar, text="关闭", width=7, command=root.destroy).pack(side="right", padx=6)
 
@@ -1917,19 +2007,28 @@ def _open_scan_window():
 
         def _qadd_row(cand, idx):
             base = C_EVEN if idx % 2 == 0 else C_ODD
+            in_lib = cand.get("in_library")
             rf = tk.Frame(qinner, bg=base); rf.pack(fill="x")
             rf.columnconfigure(1, weight=1, minsize=150)
-            chk = tk.BooleanVar(value=False)         # 默认全不选,主动勾选要导入的
-            tk.Checkbutton(rf, variable=chk, bg=base, activebackground=base).grid(row=0, column=0, padx=(6, 2))
+            chk = tk.BooleanVar(master=root, value=False)   # 默认全不选;master=root 防多窗口串解释器
+            cb = tk.Checkbutton(rf, variable=chk, bg=base, activebackground=base)
+            if in_lib:
+                cb.config(state="disabled")          # 已入库:禁止勾选
+            cb.grid(row=0, column=0, padx=(6, 2))
             e_t = tk.Entry(rf, width=20); e_t.insert(0, cand.get("title") or "")
             e_t.grid(row=0, column=1, sticky="we", padx=2, pady=4)
             e_a = tk.Entry(rf, width=10); e_a.insert(0, cand.get("artist") or "")
             e_a.grid(row=0, column=2, padx=2)
             iv = cand.get("interval", 0) or 0
             tk.Label(rf, text="%d:%02d" % (iv // 60, iv % 60), bg=base, fg="#999999", width=5).grid(row=0, column=3, padx=2)
-            tk.Label(rf, text="QQ", bg=base, fg="#888888", width=3).grid(row=0, column=4, padx=(2, 4))
-            tk.Button(rf, text="▶ 试听", command=lambda c=cand: _qpreview(c)).grid(row=0, column=5, padx=(2, 6))
-            qrows.append({"cand": cand, "chk": chk, "e_title": e_t, "e_artist": e_a})
+            if in_lib:                               # 已入库:置灰、禁编辑、标"已入库"、无试听
+                e_t.config(state="disabled", disabledforeground="#9aa0a6")
+                e_a.config(state="disabled", disabledforeground="#9aa0a6")
+                tk.Label(rf, text="已入库", bg=base, fg="#9aa0a6", width=6).grid(row=0, column=4, padx=(2, 6))
+            else:
+                tk.Label(rf, text="QQ", bg=base, fg="#888888", width=3).grid(row=0, column=4, padx=(2, 4))
+                tk.Button(rf, text="▶ 试听", command=lambda c=cand: _qpreview(c)).grid(row=0, column=5, padx=(2, 6))
+            qrows.append({"cand": cand, "chk": chk, "e_title": e_t, "e_artist": e_a, "in_library": in_lib})
 
         def _qrender_new():
             results = qst["results"] or []
@@ -1990,7 +2089,7 @@ def _open_scan_window():
             threading.Thread(target=_do_search, args=(qst["gen"], kw), daemon=True).start()
 
         def _qconfirm():
-            picked = [r for r in qrows if r["chk"].get()]
+            picked = [r for r in qrows if r["chk"].get() and not r.get("in_library")]
             if not picked:
                 return
             qconfirm_btn.config(state="disabled"); qsearch_btn.config(state="disabled")
@@ -2052,7 +2151,7 @@ def _open_scan_window():
             if qst.get("qr_png") is not None:
                 png = qst["qr_png"]; qst["qr_png"] = None
                 try:
-                    img = tk.PhotoImage(data=_b64.b64encode(png).decode("ascii"))
+                    img = tk.PhotoImage(master=root, data=_b64.b64encode(png).decode("ascii"))
                     qqr_ref["img"] = img; qqr_lbl.config(image=img)
                     if not qqr_lbl.winfo_ismapped():
                         qqr_lbl.pack(pady=4, before=qstatus)
@@ -2082,10 +2181,11 @@ def _open_scan_window():
                 if qst.get("error"):
                     qstatus.config(text="搜索失败:%s" % qst["error"], fg="#c0392b")
                 elif n:
-                    qstatus.config(text="搜到 %d 首(已排除库里已有);勾选、可改歌名/歌手,确认入库(下载解码较慢)。" % n,
+                    new_n = sum(1 for c in (qst["results"] or []) if not c.get("in_library"))
+                    qstatus.config(text="搜到 %d 首(灰色=已入库,%d 首可导入);勾选新歌,确认入库(下载解码较慢)。" % (n, new_n),
                                    fg="#666666")
                 else:
-                    qstatus.config(text="没有结果(或都已在库)。", fg="#666666")
+                    qstatus.config(text="没有结果。", fg="#666666")
                 qst["phase"] = "idle"; qst["error"] = None
             if qst.get("msg"):
                 qstatus.config(text=qst["msg"], fg="#666666"); qst["msg"] = None
@@ -2144,21 +2244,21 @@ def _open_library_browser(selftest=False):
             top = tk.Frame(root)
             top.pack(fill="x", padx=10, pady=(10, 2))
             tk.Label(top, text="搜索:").pack(side="left")
-            q = tk.StringVar()
+            q = tk.StringVar(master=root)
             tk.Entry(top, textvariable=q).pack(side="left", fill="x", expand=True, padx=6)
-            count_var = tk.StringVar()
+            count_var = tk.StringVar(master=root)
             tk.Label(top, textvariable=count_var).pack(side="left")
 
             # 筛选 + 排序(选择即刷新)
             bar2 = tk.Frame(root)
             bar2.pack(fill="x", padx=10, pady=(2, 0))
             tk.Label(bar2, text="筛选:").pack(side="left")
-            f_var = tk.StringVar(value="全部")
+            f_var = tk.StringVar(master=root, value="全部")
             cb_f = ttk.Combobox(bar2, textvariable=f_var, state="readonly", width=9,
                                 values=("全部", "只看Live", "排除Live"))
             cb_f.pack(side="left", padx=(4, 14))
             tk.Label(bar2, text="排序:").pack(side="left")
-            s_var = tk.StringVar(value="最新入库")
+            s_var = tk.StringVar(master=root, value="最新入库")
             cb_s = ttk.Combobox(bar2, textvariable=s_var, state="readonly", width=11,
                                 values=("最新入库", "未勾选在前", "已勾选在前"))
             cb_s.pack(side="left", padx=4)
@@ -2258,7 +2358,7 @@ def _open_library_browser(selftest=False):
                 rf.pack(fill="x")
                 rf.columnconfigure(1, weight=1, minsize=160)   # 歌名列伸缩(col1)
                 # col0:勾选框 = 加入歌单(默认按 STATE["setlist"];顶端滚动字幕)
-                var = tk.BooleanVar(value=(mid in STATE.get("setlist", [])))
+                var = tk.BooleanVar(master=root, value=(mid in STATE.get("setlist", [])))
                 chk = tk.Checkbutton(
                     rf, variable=var, bg=base, activebackground=base,
                     command=lambda mid=mid, var=var: set_setlist_member(mid, var.get()))

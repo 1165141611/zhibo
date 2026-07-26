@@ -155,7 +155,7 @@ def search(keyword, num=20, page=1, known_mids=None):
     seen = set()
     for s in _run(_search(keyword, num, page)):
         mid = s.get("mid")
-        if not mid or mid in known or mid in seen:
+        if not mid or mid in seen:            # 已入库的不再跳过(标 in_library,UI 置灰禁选);仅去重同 mid
             continue
         seen.add(mid)
         f = s.get("file") or {}
@@ -166,6 +166,7 @@ def search(keyword, num=20, page=1, known_mids=None):
             # 用 title(含"(Live)/(DJ版)"等版本后缀)兜底 name,否则同名不同版分不清
             "title": (s.get("title") or s.get("name") or "").strip(), "artist": _singer_str(s),
             "interval": s.get("interval", 0), "needs_name": False,
+            "in_library": mid in known,
         })
     return cands
 

@@ -905,3 +905,37 @@ vkey 授权流按连接限速**(单连接~210KB/s≈5倍实时码率,"够流畅�
   勾选项(`checked=studio_visible`)。**Studio One 显隐托盘↔App 双向同步**:抽出 `_toggle_studio_visible`(show/hide+存盘+
   `refresh_tray`+`_threadsafe_broadcast`),托盘项与 App 的 `studio_toggle` 命令共用它——App 切时刷托盘勾选、托盘切时推 App。
   隔离测:曲库/扫描 toggle 开设关清、Studio toggle True↔False 不崩、pystray 动态文本+勾选项可构建。
+- **扫描列表显示已入库(置灰禁选)(2026-07-26)**:原三处扫描(`library.scan_pc`/`mobile_import.scan_phone`/
+  `qqmusic_import.search`)都**跳过**已入库的歌。改成**不跳过、只标 `in_library=True`**返回(手机侧已入库的**不再 adb 拉取/
+  ffmpeg 转换**,直接用 `library.manifest()` 里的标题列出,省时;PC/QQ 侧同理用库里标题)。UI(`_add_row`/`_qadd_row`)对
+  `in_library` 行:勾选框 `state=disabled`、歌名/歌手 Entry `state=disabled`+`disabledforeground` 置灰、来源列改标「已入库」、
+  去掉试听按钮;全选/全不选与确认入库的 `picked` 都 `not r.get("in_library")` 跳过。状态栏显示"共 N 首(灰色=已入库,M 首新歌)"。
+  实测 `scan_pc` 对 WeSing 缓存返回 3 已入库+2 新歌(原只返 2 新歌),tk 的 `disabled/disabledforeground` 选项合法、窗口渲染无异常。
+- **手机扫描"列表先出、转码后置"(2026-07-26)**:原 `scan_phone` 扫描时就对每首新歌 `_pull` 几MB tkm + `mobile_convert.py`
+  解密转码(tkm QMCv1→m4a→ffmpeg 解整首→写~100MB PCM,几秒/首),导致"只加载列表也要等很久"。**歌名只在小 qrc 里**,不必
+  先转音频。改:`scan_phone` **列表阶段只 `_pull` qrc + `library._qrc_meta` 解出歌名/歌手**(~0.1s/首,增量回调显示),候选带
+  `needs_convert=True` + `phone`{serial,qname,oke,tkms};**重活拆到新函数 `convert_phone_song(cand)`**,在**确认入库 `_confirm._work`**
+  与**试听 `_preview_kge`** 里才调(转过则 `accompany.pcm` 存在即复用,试听后入库不重转)。UI 进度用 `st["op_msg"]`(_poll 空闲态显示)。
+  **实测(真机 192.168.1.2):上千 qrc 缓存里 110 首候选(92 已入库+18 新歌)4.5s 全出**(原需逐首转码几十秒~几分钟);
+  单首全新转换 2.2s、四件套伴奏 291.7s 原唱等长;二次调用复用 0.00s。与 QQ 页签"搜索即时、入库才下载"同一套延迟思路。
+- **K歌页签加检索框 + 缓存时间倒序(2026-07-26)**:候选统一加 `mtime`(`scan_pc`=缓存目录 `getmtime`;`scan_phone`=qrc 的
+  stat `%Y`)。扫描时仍增量显示(扫描顺序),**扫完 `_resort_render` 按 `mtime` 倒序重排重渲**(最近缓存在最上)。顶部新增「检索」
+  框(`search_var` + `trace_add` + 200ms 防抖 `root.after`):`_apply_filter` 按歌名/歌手子串**隐藏/重排可见行(pack_forget→依 rows
+  顺序重 pack)**,不重建行→**勾选/改名不丢**;`_set_all` 只对可见行生效。行 dict 存 `rf` 供显隐。实测 scan_pc/scan_phone 候选均带
+  mtime、倒序正确、窗口构建无异常。(QQ 页签本就是在线搜索、另有搜索框,不受影响。)
+- **曲库窗与扫描窗同时开→后开的被干扰 根治(2026-07-26)**:现象——两窗同开时,**后开**那个的下拉/单选失灵(扫描后开:点
+  手机模式没反应、adb 下拉一直禁用;曲库后开:筛选/排序/搜索下拉空白)。**根因(实证)**:两窗各在自己线程建独立 `tk.Tk()` 根,
+  而 **`tk.StringVar()`/`tk.BooleanVar()`/`tk.PhotoImage()` 不传 `master` 时绑到全局 `tkinter._default_root`——即"第一个打开的
+  窗口"的 Tcl 解释器**(第2个 `Tk()` 不会改 `_default_root`)。于是后开窗口里的变量全绑到先开窗口的解释器 → 后开窗口的
+  Radiobutton 改不动自己的 `scan_mode`(点手机模式后 var 仍 'pc' → `_on_mode` keep 禁用)、Combobox 的 `textvariable` 跨解释器
+  → 显示空白。实证:`tk.StringVar()` 绑 `r1.tk`、`tk.StringVar(master=r2)` 才绑 `r2.tk`;旧写法点单选 var 卡 'pc',master=r2 后
+  正常变 'phone'。**修复**:给两窗全部 **12 处 `tk.StringVar/BooleanVar/PhotoImage` + 配对二维码的 `ImageTk.PhotoImage` 共 13 处**
+  创建点显式传 `master=<本窗根/Toplevel>`(绑各自窗口解释器,不依赖全局默认根)。双窗口(曲库先/扫描后)共存冒烟无异常。
+  **教训:多 Tk 根(多窗口各自线程)时,所有 tk 变量/图片(含 PIL ImageTk)必须显式 `master=`。** 顺带:K歌页签检索框缩短
+  (width=16)移到「重新扫描」左侧同一行,不再独占一行。
+- **`_save_persist` 加"未恢复不写盘"守卫(2026-07-26)**:事故——开发期某测试 `import server` 后在**默认空 STATE** 上调到
+  `_save_persist`(经 `_toggle_studio_visible`/`set_setlist_member`),把用户真实 `state_cache.json` 覆盖成默认值(**setlist 被清空**,
+  致播放器顶端滚动歌单不显示)。根因:`_save_persist` 无条件写全局缓存路径,任何 import 本模块的进程都可能误伤。**修复**:加
+  `_persist_ready` 标志,`_restore_persist` 里置 True,`_save_persist` 未 ready 直接 return——生产 `main()` 必先 `_restore_persist`
+  故不受影响,而测试/早期误调不再写盘。隔离测(临时路径):未 ready 不写、ready 后正常写。歌单推送链本身完好(`song_meta` 解析
+  歌名、`set_setlist_member` 加歌均正常);被清空的 setlist mid 无备份不可恢复,需在曲库管理重新勾选(master= 修复后勾选已正常)。
