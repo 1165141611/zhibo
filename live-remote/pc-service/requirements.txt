@@ -8,6 +8,14 @@ pillow
 winrt-runtime
 winrt-Windows.Media.Control
 winrt-Windows.Foundation
-imageio-ffmpeg          # 手机导入:mobile_convert.py 解码 tkm→M4A→PCM(自带 ffmpeg 二进制)
+imageio-ffmpeg          # 手机/QQ导入:解码音频→PCM(自带 ffmpeg 二进制)
 qrcode                  # 扫描窗口「扫码连接」:生成无线 ADB 配对二维码(pillow 已有)
+qqmusic-api-python      # QQ音乐导入:登录态 API 搜索 + 取明文伴奏/原唱/逐字歌词(qqmusic_import.py);niquests 随它装
 # 另需 karaoke-player 的 numpy/sounddevice/PySide6/audiotsm(同一解释器,见 config 注释)
+#
+# 可选(QQ音乐 无官方伴奏 stem 的歌,人声分离出伴奏;qqmusic_import.separate_accompaniment):
+#   有 NVIDIA GPU 装 CUDA 版:pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+#   再:pip install demucs
+#   未装则 prepare 无 ACCOM 时降级为两轨都用原唱(separation_available() 自动判断,不报错)。
+# demucs         # 人声分离(htdemucs);以子进程跑,torch 不常驻直播服务
+# torch/torchaudio  # 同上依赖(CUDA 版走 pytorch 官方 index)

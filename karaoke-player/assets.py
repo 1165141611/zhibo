@@ -28,6 +28,10 @@ def _qrc_decrypt(raw: bytes) -> str:
     - PC 版:`[offset:0]\\n` 明文头 + 裸密文
     统一转成密文字节后 tripledes+zlib。
     """
+    # QQ音乐 来源:已解密的明文 QRC XML(逐字),直接返回(见 pc-service/qqmusic_import.py)
+    s = raw.lstrip()
+    if s[:5] == b"<?xml" or b"<QrcInfos" in raw[:200] or b"LyricContent=" in raw[:400]:
+        return raw.decode("utf-8", "replace")
     head = raw.lstrip()[:16]
     if all(c in b"0123456789abcdefABCDEF\r\n\t " for c in raw.strip()):
         cipher = bytearray.fromhex(raw.strip().decode("ascii"))

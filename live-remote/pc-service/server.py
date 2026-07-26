@@ -1539,29 +1539,54 @@ def _open_scan_window():
 
         root = tk.Tk()
         root.title("扫描导入歌曲")
-        root.geometry("700x520")
+        root.geometry("720x560")
         root.attributes("-topmost", True)
+
+        # 双页签:K歌(带音准)=本地缓存扫描;QQ(无音准)=登录态在线搜索
+        nb = ttk.Notebook(root); nb.pack(fill="both", expand=True)
+        kge = tk.Frame(nb); nb.add(kge, text="K歌（带音准）")
+        qqf = tk.Frame(nb); nb.add(qqf, text="QQ（无音准）")
 
         st = {"phase": "idle", "msg": "", "results": None, "error": None,
               "gen": 0, "serial": None, "import_done": None}
         dev_map = {}   # 下拉显示名 -> serial
 
-        # 顶部:手机设备下拉 + 重新扫描
-        top = tk.Frame(root); top.pack(fill="x", padx=10, pady=(10, 4))
-        tk.Label(top, text="手机设备:").pack(side="left")
-        dev_var = tk.StringVar()
-        dev_cb = ttk.Combobox(top, textvariable=dev_var, state="readonly", width=26)
-        dev_cb.pack(side="left", padx=6)
-        tk.Button(top, text="📶 扫码连接",
-                  command=lambda: _open_pair_dialog(root, _on_paired)).pack(side="left")
+        # ============ K歌页签:扫描来源(电脑/手机 二选一)+ 设备 + 重新扫描 ============
+        # 一次只扫一端,避免两端数据互相干扰。
+        scan_mode = tk.StringVar(value="pc")
+        top = tk.Frame(kge); top.pack(fill="x", padx=10, pady=(10, 2))
+        tk.Label(top, text="扫描来源:").pack(side="left")
+        tk.Radiobutton(top, text="电脑缓存", variable=scan_mode, value="pc",
+                       command=lambda: _on_mode()).pack(side="left")
+        tk.Radiobutton(top, text="手机全民K歌", variable=scan_mode, value="phone",
+                       command=lambda: _on_mode()).pack(side="left", padx=(0, 8))
         rescan_btn = tk.Button(top, text="重新扫描"); rescan_btn.pack(side="right")
 
-        status_lbl = tk.Label(root, text="", anchor="w", fg="#666666")
+        top2 = tk.Frame(kge); top2.pack(fill="x", padx=10, pady=(0, 4))
+        dev_lbl = tk.Label(top2, text="手机设备:"); dev_lbl.pack(side="left")
+        dev_var = tk.StringVar()
+        dev_cb = ttk.Combobox(top2, textvariable=dev_var, state="readonly", width=26)
+        dev_cb.pack(side="left", padx=6)
+        pair_btn = tk.Button(top2, text="📶 扫码连接",
+                             command=lambda: _open_pair_dialog(root, _on_paired))
+        pair_btn.pack(side="left")
+
+        def _on_mode():
+            """切来源:手机模式才启用设备行;并刷新状态提示(不自动扫描,由用户点『重新扫描』)。"""
+            phone = scan_mode.get() == "phone"
+            dev_cb.config(state="readonly" if phone else "disabled")
+            pair_btn.config(state="normal" if phone else "disabled")
+            dev_lbl.config(fg="#111111" if phone else "#999999")
+            status_lbl.config(
+                text=("选好手机设备后点『重新扫描』(只扫手机全民K歌)。" if phone
+                      else "点『重新扫描』(只扫电脑 WeSing 缓存)。"), fg="#666666")
+
+        status_lbl = tk.Label(kge, text="", anchor="w", fg="#666666")
         status_lbl.pack(fill="x", padx=12)
-        prog = ttk.Progressbar(root, mode="indeterminate")   # loading(动态显隐)
+        prog = ttk.Progressbar(kge, mode="indeterminate")   # loading(动态显隐)
 
         # 表格区:Canvas + 内嵌 Frame + 滚动条
-        body = tk.Frame(root); body.pack(fill="both", expand=True, padx=(10, 0), pady=4)
+        body = tk.Frame(kge); body.pack(fill="both", expand=True, padx=(10, 0), pady=4)
         canvas = tk.Canvas(body, highlightthickness=0)
         vsb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
         vsb.pack(side="right", fill="y"); canvas.pack(side="left", fill="both", expand=True)
@@ -1575,11 +1600,13 @@ def _open_scan_window():
                 canvas.yview_moveto(0)
                 return
             canvas.yview_scroll(int(-e.delta / 120), "units")
-        canvas.bind_all("<MouseWheel>", _on_wheel)
+        # 两页签各自的滚动区都想收滚轮:按鼠标进出该 canvas 时才 bind_all,避免两页签抢滚轮。
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
         rows = []   # [{cand, chk, e_title, e_artist}]
 
         # 底部按钮
-        bar = tk.Frame(root); bar.pack(fill="x", padx=10, pady=(2, 10))
+        bar = tk.Frame(kge); bar.pack(fill="x", padx=10, pady=(2, 10))
 
         def _set_all(v):
             for r in rows:
@@ -1606,7 +1633,7 @@ def _open_scan_window():
             base = C_EVEN if idx % 2 == 0 else C_ODD
             rf = tk.Frame(inner, bg=base); rf.pack(fill="x")
             rf.columnconfigure(1, weight=1, minsize=150)
-            chk = tk.BooleanVar(value=True)
+            chk = tk.BooleanVar(value=False)         # 默认全不选,主动勾选要导入的
             tk.Checkbutton(rf, variable=chk, bg=base, activebackground=base).grid(row=0, column=0, padx=(6, 2))
             e_t = tk.Entry(rf, width=24)
             title = (cand.get("title") or "").strip()
@@ -1634,8 +1661,8 @@ def _open_scan_window():
             for i in range(len(rows), len(results)):
                 _add_row(results[i], i)
 
-        # ---- 扫描 worker(慢:adb 拉取 + ffmpeg 转换;每转好一首即入 results,UI 增量显示)----
-        def _do_scan(gen, serial):
+        # ---- 扫描 worker(**只扫选中的那一端**;手机侧慢:adb 拉取 + ffmpeg 转换,边转边显示)----
+        def _do_scan(gen, serial, mode):
             def pcb(msg):
                 if st["gen"] == gen:
                     st["msg"] = msg
@@ -1645,26 +1672,30 @@ def _open_scan_window():
                     st["results"].append(c)         # 追加到 _start_scan 建好的同一 list
 
             try:
-                st["msg"] = "扫描 PC 缓存…"
-                for c in library.scan_pc():          # PC 侧快,先全部铺上
-                    add(c)
-                if serial:
-                    st["msg"] = "扫描手机…"
+                if mode == "phone":
+                    if not serial:
+                        raise RuntimeError("未选择手机设备(先连上手机或用『扫码连接』)")
+                    st["msg"] = "扫描手机全民K歌…"
                     mobile_import.scan_phone(serial, progress_cb=pcb, on_candidate=add)
+                else:
+                    st["msg"] = "扫描电脑 WeSing 缓存…"
+                    for c in library.scan_pc():
+                        add(c)
                 if st["gen"] == gen:
                     st["phase"] = "done"
-            except Exception as e:                   # 手机侧异常:已铺的 PC/部分结果保留
+            except Exception as e:                   # 异常:已铺的部分结果保留
                 if st["gen"] == gen:
                     st["error"], st["phase"] = str(e), "done"
 
         def _start_scan():
+            mode = scan_mode.get()
             st["gen"] += 1
             st.update(phase="scanning", msg="准备…", results=[], error=None)
             st["serial"] = dev_map.get(dev_var.get())
             _clear_rows(); canvas.yview_moveto(0)
             prog.pack(fill="x", padx=12, pady=4, before=body); prog.start(12)
             confirm_btn.config(state="disabled"); rescan_btn.config(state="disabled")
-            threading.Thread(target=_do_scan, args=(st["gen"], st["serial"]), daemon=True).start()
+            threading.Thread(target=_do_scan, args=(st["gen"], st["serial"], mode), daemon=True).start()
 
         def _poll():
             _render_new()                            # 扫出一首渲一首
@@ -1675,7 +1706,8 @@ def _open_scan_window():
                 prog.stop(); prog.pack_forget()
                 confirm_btn.config(state="normal"); rescan_btn.config(state="normal")
                 if st["error"]:
-                    status_lbl.config(text="⚠ 手机扫描失败:%s(已列出 PC/已转换的)" % st["error"], fg="#c0392b")
+                    status_lbl.config(text="⚠ 扫描失败:%s%s" % (
+                        st["error"], "(已列出已转换的)" if n else ""), fg="#c0392b")
                 elif n:
                     status_lbl.config(text="扫描到 %d 首库里没有的新歌;勾选要导入的,可改歌名/原唱,确认入库。" % n,
                                       fg="#666666")
@@ -1731,15 +1763,267 @@ def _open_scan_window():
             else:
                 dev_cb["values"] = [NO_DEV]; dev_var.set(NO_DEV)
 
-        def _on_paired(serial):           # 扫码配对成功:刷新设备、选中新机、重扫
+        def _on_paired(serial):           # 扫码配对成功:切手机模式、刷新设备、选中新机、重扫
+            scan_mode.set("phone"); _on_mode()
             _reload_devices(select_serial=serial)
             _start_scan()
 
         _reload_devices()
-        dev_cb.bind("<<ComboboxSelected>>", lambda e: _start_scan())
+        # 换设备只在手机模式下自动重扫(电脑模式与设备无关)
+        dev_cb.bind("<<ComboboxSelected>>", lambda e: scan_mode.get() == "phone" and _start_scan())
 
         _poll()
-        _start_scan()
+        _on_mode()                        # 初始:电脑模式(禁用设备行)+ 相应提示,不自动扫描
+
+        # ================= QQ（无音准）页签 =================
+        import base64 as _b64
+        try:
+            import qqmusic_import
+        except Exception as _qe:            # 依赖没装好时降级:页签可见但提示
+            qqmusic_import = None
+            print("[QQ] qqmusic_import 导入失败:", _qe)
+
+        qst = {"phase": "idle", "msg": None, "results": None, "error": None, "gen": 0,
+               "qr_png": None, "login_msg": None, "login_done": None, "import_done": None,
+               "dl_pct": None}   # dl_pct:None=不确定(转圈);0-100=下载百分比(确定进度条)
+        qrows = []
+
+        qtop = tk.Frame(qqf); qtop.pack(fill="x", padx=10, pady=(10, 4))
+        qlogin_lbl = tk.Label(qtop, text="", fg="#666666"); qlogin_lbl.pack(side="left")
+        qtype = ttk.Combobox(qtop, values=["QQ", "微信", "QQ音乐App"], state="readonly", width=9)
+        qtype.set("QQ")
+        qlogin_btn = tk.Button(qtop, text="登录")
+        qlogout_btn = tk.Button(qtop, text="退出登录")
+        qsearch_var = tk.StringVar()
+        qsearch_entry = tk.Entry(qtop, textvariable=qsearch_var, width=20)
+        qsearch_btn = tk.Button(qtop, text="搜索")
+
+        qqr_lbl = tk.Label(qqf); qqr_ref = {"img": None}    # 登录时显示二维码
+        qstatus = tk.Label(qqf, text="", anchor="w", fg="#666666"); qstatus.pack(fill="x", padx=12)
+        qprog = ttk.Progressbar(qqf, mode="indeterminate")
+
+        qbody = tk.Frame(qqf); qbody.pack(fill="both", expand=True, padx=(10, 0), pady=4)
+        qcanvas = tk.Canvas(qbody, highlightthickness=0)
+        qvsb = ttk.Scrollbar(qbody, orient="vertical", command=qcanvas.yview)
+        qvsb.pack(side="right", fill="y"); qcanvas.pack(side="left", fill="both", expand=True)
+        qcanvas.configure(yscrollcommand=qvsb.set)
+        qinner = tk.Frame(qcanvas, bg="#ffffff")
+        qwin = qcanvas.create_window((0, 0), window=qinner, anchor="nw")
+        qinner.bind("<Configure>", lambda e: qcanvas.configure(scrollregion=qcanvas.bbox("all")))
+        qcanvas.bind("<Configure>", lambda e: qcanvas.itemconfig(qwin, width=e.width))
+
+        def _qwheel(e):
+            if qinner.winfo_height() <= qcanvas.winfo_height():
+                qcanvas.yview_moveto(0); return
+            qcanvas.yview_scroll(int(-e.delta / 120), "units")
+        qcanvas.bind("<Enter>", lambda e: qcanvas.bind_all("<MouseWheel>", _qwheel))
+        qcanvas.bind("<Leave>", lambda e: qcanvas.unbind_all("<MouseWheel>"))
+
+        qbar = tk.Frame(qqf); qbar.pack(fill="x", padx=10, pady=(2, 10))
+        tk.Button(qbar, text="全选", width=6,
+                  command=lambda: [r["chk"].set(True) for r in qrows]).pack(side="left")
+        tk.Button(qbar, text="全不选", width=7,
+                  command=lambda: [r["chk"].set(False) for r in qrows]).pack(side="left", padx=4)
+        qconfirm_btn = tk.Button(qbar, text="确认入库"); qconfirm_btn.pack(side="right")
+        tk.Button(qbar, text="关闭", width=7, command=root.destroy).pack(side="right", padx=6)
+
+        def _qclear():
+            for w in qinner.winfo_children():
+                w.destroy()
+            qrows.clear()
+
+        def _qadd_row(cand, idx):
+            base = C_EVEN if idx % 2 == 0 else C_ODD
+            rf = tk.Frame(qinner, bg=base); rf.pack(fill="x")
+            rf.columnconfigure(1, weight=1, minsize=150)
+            chk = tk.BooleanVar(value=False)         # 默认全不选,主动勾选要导入的
+            tk.Checkbutton(rf, variable=chk, bg=base, activebackground=base).grid(row=0, column=0, padx=(6, 2))
+            e_t = tk.Entry(rf, width=20); e_t.insert(0, cand.get("title") or "")
+            e_t.grid(row=0, column=1, sticky="we", padx=2, pady=4)
+            e_a = tk.Entry(rf, width=10); e_a.insert(0, cand.get("artist") or "")
+            e_a.grid(row=0, column=2, padx=2)
+            iv = cand.get("interval", 0) or 0
+            tk.Label(rf, text="%d:%02d" % (iv // 60, iv % 60), bg=base, fg="#999999", width=5).grid(row=0, column=3, padx=2)
+            tk.Label(rf, text="QQ", bg=base, fg="#888888", width=3).grid(row=0, column=4, padx=(2, 4))
+            tk.Button(rf, text="▶ 试听", command=lambda c=cand: _qpreview(c)).grid(row=0, column=5, padx=(2, 6))
+            qrows.append({"cand": cand, "chk": chk, "e_title": e_t, "e_artist": e_a})
+
+        def _qrender_new():
+            results = qst["results"] or []
+            for i in range(len(qrows), len(results)):
+                _qadd_row(results[i], i)
+
+        def _refresh_login_ui():
+            if qqmusic_import is None:
+                qlogin_lbl.config(text="✗ QQ模块未就绪(装 qqmusic-api-python)", fg="#c0392b")
+                qlogin_btn.config(state="disabled"); qsearch_btn.config(state="disabled")
+                qlogout_btn.config(state="disabled"); return
+            if qqmusic_import.logged_in():
+                qlogin_lbl.config(text="✓ 已登录", fg="#27ae60"); qlogin_btn.config(text="重新登录")
+                qlogout_btn.config(state="normal")
+            else:
+                qlogin_lbl.config(text="○ 未登录", fg="#c0392b"); qlogin_btn.config(text="登录")
+                qlogout_btn.config(state="disabled")
+
+        def _do_login():
+            lt = {"QQ": "QQ", "微信": "WX", "QQ音乐App": "MOBILE"}.get(qtype.get(), "QQ")
+            try:
+                ok = qqmusic_import.login_qr(
+                    lt, on_qr=lambda p: qst.update(qr_png=p),
+                    progress=lambda s: qst.update(login_msg=s), timeout=180)
+                qst["login_done"] = bool(ok)
+            except Exception as e:
+                qst["login_msg"] = "登录出错:%s" % e; qst["login_done"] = False
+
+        def _start_login():
+            if qqmusic_import is None:
+                return
+            qst.update(qr_png=None, login_msg="生成二维码…", login_done=None)
+            qprog.pack(fill="x", padx=12, pady=4, before=qbody); qprog.start(12)
+            qlogin_btn.config(state="disabled")
+            threading.Thread(target=_do_login, daemon=True).start()
+
+        def _do_search(gen, kw):
+            try:
+                res = qqmusic_import.search(kw, num=20)
+                if qst["gen"] == gen:
+                    qst["results"] = res; qst["phase"] = "done"
+            except Exception as e:
+                if qst["gen"] == gen:
+                    qst["error"] = str(e); qst["phase"] = "done"
+
+        def _start_search():
+            if qqmusic_import is None:
+                return
+            if not qqmusic_import.logged_in():
+                qstatus.config(text="请先登录 QQ音乐（点上方“登录”扫码）", fg="#c0392b"); return
+            kw = qsearch_var.get().strip()
+            if not kw:
+                return
+            qst["gen"] += 1; qst.update(phase="searching", results=[], error=None)
+            _qclear(); qcanvas.yview_moveto(0)
+            qprog.pack(fill="x", padx=12, pady=4, before=qbody); qprog.start(12)
+            qconfirm_btn.config(state="disabled"); qsearch_btn.config(state="disabled")
+            threading.Thread(target=_do_search, args=(qst["gen"], kw), daemon=True).start()
+
+        def _qconfirm():
+            picked = [r for r in qrows if r["chk"].get()]
+            if not picked:
+                return
+            qconfirm_btn.config(state="disabled"); qsearch_btn.config(state="disabled")
+            qst["import_done"] = None
+            qprog.pack(fill="x", padx=12, pady=4, before=qbody); qprog.start(12)
+
+            def _work():
+                n = 0
+                for i, r in enumerate(picked):
+                    c = r["cand"]
+                    head = "入库 %d/%d " % (i + 1, len(picked))
+                    try:
+                        qst.update(msg=head + r["e_title"].get(), dl_pct=None)
+                        qqmusic_import.prepare(
+                            c,
+                            progress_cb=lambda m, h=head: qst.update(msg=h + m, dl_pct=None),
+                            pct_cb=lambda label, pct, h=head: qst.update(msg="%s%s %d%%" % (h, label, pct), dl_pct=pct))
+                        library.import_candidate(c, r["e_title"].get().strip(), r["e_artist"].get().strip())
+                        n += 1
+                    except Exception as e:
+                        print("[QQ] 入库失败 %s: %s" % (c.get("mid"), e))
+                try:
+                    _on_lib_change()
+                except Exception:
+                    pass
+                qst["import_done"] = n
+            threading.Thread(target=_work, daemon=True).start()
+
+        def _qpreview(cand):
+            """QQ 试听:worker 里**只下伴奏一轨**(preview=True)到暂存 → 复用 _preview 子进程播放
+            (系统默认输出=自己听,不进直播)。之后勾选入库会再下全量覆盖。"""
+            if qqmusic_import is None:
+                return
+
+            def _work():
+                try:
+                    qst.update(msg="试听:%s" % (cand.get("title") or ""), dl_pct=None)
+                    qqmusic_import.prepare(
+                        cand, preview=True,
+                        progress_cb=lambda m: qst.update(msg="试听 " + m, dl_pct=None),
+                        pct_cb=lambda label, pct: qst.update(msg="试听 %s %d%%" % (label, pct), dl_pct=pct))
+                    qst.update(msg="试听中(伴奏,系统默认输出、不进直播)。", dl_pct=None)
+                    _preview(cand)                    # src_root=QQ_STAGING_DIR,已备好伴奏
+                except Exception as e:
+                    qst.update(msg="试听失败:%s" % e, dl_pct=None)
+            threading.Thread(target=_work, daemon=True).start()
+
+        def _qpoll():
+            # 进度条:显示时按 dl_pct 切「转圈(不确定)」/「百分比(确定)」
+            if qprog.winfo_ismapped():
+                pct = qst.get("dl_pct")
+                if pct is None:
+                    if str(qprog["mode"]) != "indeterminate":
+                        qprog.config(mode="indeterminate"); qprog.start(12)
+                else:
+                    if str(qprog["mode"]) != "determinate":
+                        qprog.stop(); qprog.config(mode="determinate", maximum=100)
+                    qprog["value"] = pct
+            if qst.get("qr_png") is not None:
+                png = qst["qr_png"]; qst["qr_png"] = None
+                try:
+                    img = tk.PhotoImage(data=_b64.b64encode(png).decode("ascii"))
+                    qqr_ref["img"] = img; qqr_lbl.config(image=img)
+                    if not qqr_lbl.winfo_ismapped():
+                        qqr_lbl.pack(pady=4, before=qstatus)
+                except Exception:            # Tk 不认该 PNG 时退回:存临时文件用系统看图器打开
+                    try:
+                        import tempfile
+                        fp = os.path.join(tempfile.gettempdir(), "qq_login_qr.png")
+                        open(fp, "wb").write(png); os.startfile(fp)
+                    except Exception:
+                        pass
+            if qst.get("login_msg"):
+                qstatus.config(text="登录:%s" % qst["login_msg"], fg="#666666"); qst["login_msg"] = None
+            if qst.get("login_done") is not None:
+                done = qst["login_done"]; qst["login_done"] = None
+                qprog.stop(); qprog.pack_forget(); qprog.config(mode="indeterminate"); qst["dl_pct"] = None
+                qqr_lbl.pack_forget(); qqr_ref["img"] = None
+                qlogin_btn.config(state="normal"); _refresh_login_ui()
+                qstatus.config(text="登录成功,可以搜索了。" if done else "登录未完成(超时/取消/拒绝),可重试。",
+                               fg="#27ae60" if done else "#c0392b")
+            _qrender_new()
+            if qst["phase"] == "searching":
+                qstatus.config(text="搜索中…", fg="#666666")
+            elif qst["phase"] == "done":
+                qprog.stop(); qprog.pack_forget(); qprog.config(mode="indeterminate"); qst["dl_pct"] = None
+                qconfirm_btn.config(state="normal"); qsearch_btn.config(state="normal")
+                n = len(qst["results"] or [])
+                if qst.get("error"):
+                    qstatus.config(text="搜索失败:%s" % qst["error"], fg="#c0392b")
+                elif n:
+                    qstatus.config(text="搜到 %d 首(已排除库里已有);勾选、可改歌名/歌手,确认入库(下载解码较慢)。" % n,
+                                   fg="#666666")
+                else:
+                    qstatus.config(text="没有结果(或都已在库)。", fg="#666666")
+                qst["phase"] = "idle"; qst["error"] = None
+            if qst.get("msg"):
+                qstatus.config(text=qst["msg"], fg="#666666"); qst["msg"] = None
+            if qst.get("import_done") is not None:
+                nn = qst["import_done"]; qst["import_done"] = None
+                qprog.stop(); qprog.pack_forget(); qprog.config(mode="indeterminate"); qst["dl_pct"] = None
+                qconfirm_btn.config(state="normal"); qsearch_btn.config(state="normal")
+                qstatus.config(text="已入库 %d 首(切到 K歌曲库管理可见)。" % nn, fg="#27ae60")
+            root.after(150, _qpoll)
+
+        qlogin_btn.config(command=_start_login)
+        qlogout_btn.config(command=lambda: (qqmusic_import and qqmusic_import.logout(), _refresh_login_ui()))
+        qsearch_btn.config(command=_start_search)
+        qconfirm_btn.config(command=_qconfirm)      # ← 之前漏接:确认入库按钮
+        qsearch_entry.bind("<Return>", lambda e: _start_search())
+        qtype.pack(side="left", padx=4); qlogin_btn.pack(side="left")
+        qlogout_btn.pack(side="left", padx=4)
+        qsearch_btn.pack(side="right"); qsearch_entry.pack(side="right", padx=6)
+        tk.Label(qtop, text="搜索:", fg="#666666").pack(side="right")
+        _refresh_login_ui(); _qpoll()
+
         root.after(120, root.focus_force)
         root.mainloop()
 
@@ -1763,7 +2047,7 @@ def _open_library_browser(selftest=False):
             from tkinter import ttk
             root = tk.Tk()
             root.title("K歌曲库管理")
-            root.geometry("640x500")
+            root.geometry("720x500")
             root.attributes("-topmost", True)
 
             top = tk.Frame(root)
@@ -1833,6 +2117,25 @@ def _open_library_browser(selftest=False):
                     r["paint"]()
                 k_play_mid(mid)                     # 立即 load+play,有歌在播则切歌
 
+            def _delete(mid):
+                """删除一首:**二次确认弹窗** → 出歌单/队列 + 删库文件 + 刷新列表。不可恢复。"""
+                from tkinter import messagebox
+                m = library.manifest().get(mid, {})
+                name = (m.get("title") or "").strip() or mid
+                if not messagebox.askyesno(
+                        "删除确认",
+                        "确定从曲库删除《%s》?\n将删除该歌的全部文件(伴奏/原唱/歌词等),不可恢复。" % name,
+                        icon="warning", parent=root):
+                    return
+                try:
+                    _lib_delete(mid)
+                except Exception as e:
+                    messagebox.showerror("删除失败", str(e), parent=root)
+                    return
+                if sel["mid"] == mid:
+                    sel["mid"] = None
+                refresh()                           # 重算结果集重渲(该行消失)
+
             def _select(mid):
                 sel["mid"] = mid
                 for r in rows:
@@ -1895,7 +2198,10 @@ def _open_library_browser(selftest=False):
                     row=0, column=5, padx=(6, 2), pady=3)
                 tk.Button(rf, text="播放", width=5,
                           command=lambda mid=mid: _play(mid)).grid(
-                    row=0, column=6, padx=(2, 8), pady=3)
+                    row=0, column=6, padx=(2, 2), pady=3)
+                tk.Button(rf, text="删除", width=5, fg="#c0392b", activeforeground="#c0392b",
+                          command=lambda mid=mid: _delete(mid)).grid(
+                    row=0, column=7, padx=(2, 8), pady=3)
                 cells = (l_name, l_art, l_time, kf, kl)
 
                 def _mk_paint(rf=rf, cells=cells, chk=chk, base=base, mid=mid):
@@ -2124,6 +2430,17 @@ def k_move(frm, to):
     if 0 <= frm < len(_queue) and 0 <= to < len(_queue) and frm != to:
         _queue.insert(to, _queue.pop(frm))
     _sync_queue_state()
+
+
+def _lib_delete(mid):
+    """曲库管理窗「删除」:先把该 mid 从歌单/队列摘掉,再删库文件+清单+刷新推送。
+    正在唱的歌(_now_mid)已把音频载进播放器内存,删文件不影响当前这遍(只是不再在库/队列)。"""
+    if mid in STATE.get("setlist", []):
+        set_setlist_member(mid, False)          # 出歌单 + 存盘 + 推播放器/手机
+    if mid in _queue:
+        _queue[:] = [m for m in _queue if m != mid]
+        _sync_queue_state()                     # 推队列(手机点歌抽屉)
+    library.delete(mid)                         # 删文件 + 清单 + _on_lib_change(刷托盘 + 推库列表)
 
 
 def run_tray(url):

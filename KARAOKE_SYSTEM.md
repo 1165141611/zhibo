@@ -173,6 +173,12 @@ brief([`LiveRemote/UI_DESIGN.md`](LiveRemote/UI_DESIGN.md),已作历史 brief �
     配对 song↔tkm)。曲库导入从**后台自动轮询**改为**托盘「扫描导入歌曲」窗口**:双端(PC+手机)扫描 →
     去重 → 多选可编辑表格(改名/交换伴奏原唱)→ 勾选入库(`library.scan_pc`/`import_candidate`)。
     手机歌转成与 PC 一致的四件套,播放器/点歌/升降调全链路零改动。补 PC 下不到的用户自传歌。
+  - **QQ音乐 源接入(2026-07-26)**:补"特殊版只在 QQ音乐 有"的歌。**第三个曲库来源**,与全民K歌 PC/手机并列——
+    走**登录态 API**(`qqmusic-api-python`),关键发现是**有会员权限时非加密音质直接返回明文文件、不需要 ekey/QMCv2 解密**:
+    `SpecialSongFileType.ACCOM`=明文 OggS 伴奏 stem(与原唱等长对齐)、`FLAC`=明文原唱、`lyric.get_lyric(qrc=True)`=
+    已解密逐字 QRC。产出四件套但**减 `.note`**(QQ音乐 无音高→无音准线,故页签名标「无音准」)。扫描窗改 `ttk.Notebook`
+    双页签「K歌(带音准)/QQ(无音准)」;QQ 页签=扫码登录+在线搜索+勾选,确认入库时才下载解码。编排 `pc-service/qqmusic_import.py`,
+    详见 [live-remote/DEV_LOG.md](live-remote/DEV_LOG.md) 第十八节。
 - **待做**:第④步进一步端到端联调 + 直播绿幕接入细化;手机端持续打磨(新增的音准线开关等改动需重打 APK)。
   **第①②③步(曲库导入器 + 播放器托管 + 音频控制/队列 WS API + 原生 App)均已完成。**
 

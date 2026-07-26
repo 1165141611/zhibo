@@ -130,20 +130,41 @@ def rename(mid, title, artist):
     return True
 
 
+def delete(mid):
+    """从曲库删除一首:删歌文件夹(四件套+meta)+ 清内存清单/library.json + 刷新(_on_change)。
+    返回是否原本在库。歌单/队列的摘除由 server 侧 _lib_delete 先做(library 层不碰 server 状态)。"""
+    existed = mid in _MANIFEST
+    _MANIFEST.pop(mid, None)
+    if existed:
+        _save_manifest(_MANIFEST)
+    dst = os.path.join(config.KARAOKE_LIBRARY_DIR, mid)
+    if os.path.isdir(dst):
+        shutil.rmtree(dst, ignore_errors=True)   # 删不掉(占用)也不抛,清单已清
+    if _state is not None:
+        _state["lib_count"] = len(_MANIFEST)
+    if _on_change:
+        _on_change()   # 刷托盘 + 推手机(库列表)
+    return existed
+
+
 # ---------------------------------------------------- QRC → 歌名/歌手
 def _qrc_meta(qrc_path):
     """解 QRC 只取 [ti:]/[ar:]。镜像 karaoke-player/assets._qrc_decrypt。"""
     raw = open(qrc_path, "rb").read()
-    if all(c in b"0123456789abcdefABCDEF\r\n\t " for c in raw.strip()):
-        cipher = bytearray.fromhex(raw.strip().decode("ascii"))     # 手机 hex 文本
+    s = raw.lstrip()
+    if s[:5] == b"<?xml" or b"<QrcInfos" in raw[:200] or b"LyricContent=" in raw[:400]:
+        xml = raw.decode("utf-8", "replace")                        # QQ音乐:已解密明文 QRC XML
     else:
-        nl = raw.find(b"\n")                                        # PC:[offset:0]\n+裸密文
-        cipher = bytearray(raw[nl + 1:] if nl != -1 else raw)
-    sch = tripledes.tripledes_key_setup(_QRC_KEY, tripledes.DECRYPT)
-    out = bytearray()
-    for i in range(0, len(cipher), 8):
-        out += tripledes.tripledes_crypt(cipher[i:], sch)
-    xml = zlib.decompress(out).decode("utf-8", "replace")
+        if all(c in b"0123456789abcdefABCDEF\r\n\t " for c in raw.strip()):
+            cipher = bytearray.fromhex(raw.strip().decode("ascii"))     # 手机 hex 文本
+        else:
+            nl = raw.find(b"\n")                                        # PC:[offset:0]\n+裸密文
+            cipher = bytearray(raw[nl + 1:] if nl != -1 else raw)
+        sch = tripledes.tripledes_key_setup(_QRC_KEY, tripledes.DECRYPT)
+        out = bytearray()
+        for i in range(0, len(cipher), 8):
+            out += tripledes.tripledes_crypt(cipher[i:], sch)
+        xml = zlib.decompress(out).decode("utf-8", "replace")
     m = re.search(r'LyricContent="(.*?)"\s*/>', xml, re.S)
     body = m.group(1) if m else xml
 

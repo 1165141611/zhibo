@@ -57,6 +57,14 @@
 - **QQ音乐**:PC 版做直播 BGM。**音量**按进程名(带父链归属校验)用 pycaw 控;**播放/暂停/切歌**
   走 SMTC 会话有方向控制(winrt 子进程按 AUMID 锁定 QQ音乐 会话,见 `config.QQMUSIC_SMTC_HINT`),
   不再用无方向的全局媒体键(会被抢占系统当前会话的 App 截走)。
+  **QQ音乐 导入曲库(2026-07-26)**:补"特殊版只在 QQ音乐 有"的歌。走**登录态 API**
+  (`qqmusic-api-python`,扫码登录存 `KaraokeLibrary/qq_cred.json`),关键发现:**有会员权限时非加密音质
+  直接返回明文文件,不需要 ekey/QMCv2 解密**——`SpecialSongFileType.ACCOM`=明文 OggS 伴奏 stem(真·卡拉OK
+  伴奏,与原唱等长对齐)、`SongFileType.FLAC`=明文原唱、`lyric.get_lyric(qrc=True)`=已解密逐字 QRC XML。
+  产出与全民K歌四件套一致但**减 `.note`**(QQ音乐 无音高数据→无音准线)。编排见 `pc-service/qqmusic_import.py`,
+  接在托盘「扫描导入歌曲」窗口的 **QQ(无音准)页签**(登录+搜索+勾选+下载解码入库)。**歌词也扒到了**:PC 本地
+  `QQMusicCache/QQMusicLyricNew/*_qm.qrc` 可离线解(`qmc1_decrypt 整文件XOR PRIVKEY → 跳11字节 → buggy-3DES
+  (同 QRC_KEY) → zlib`,算法出自 chenmozhijin/LDDC,与项目 tripledes 同源);当前导入走 API 歌词,本地缓存解法备用。
 
 ## 四、验证习惯
 
@@ -81,6 +89,10 @@
   (PC 缓存 `library.scan_pc` + 手机全民K歌 `mobile_import.scan_phone`,adb 拉取 + `mobile_convert.py` 子进程解密)
   → 去重 → **多选可编辑表格**(改歌名/原唱 + 交换伴奏原唱)→ 勾选入库(`library.import_candidate`)。
   loading 动画 + adb 设备下拉(默认第一台)+ 连接状态。手机歌转成与 PC 一致四件套,下游零改动。
+  **扫描窗改双页签(2026-07-26)**:`ttk.Notebook` —「K歌(带音准)」=原 PC+手机缓存双端扫描;
+  「QQ(无音准)」=QQ音乐 在线搜索(扫码登录 + 搜索框 + 结果勾选 + 可改歌名/歌手),**确认入库时才**
+  下载 ACCOM 伴奏 + FLAC 原唱 + 逐字歌词、ffmpeg 转 PCM、写四件套(减 note)。见上『三·QQ音乐 导入』
+  与 `qqmusic_import.py`。去重复用 `library.manifest()`;凭据/暂存在 `config.QQ_CRED_PATH/QQ_STAGING_DIR`。
 - **LiveRemote**:安卓原生 App(Compose,演唱/队列/遥控三页签),遥控页含声卡场景 + 窗口开关
   (Studio One / K歌歌词 / 音准线显隐);**QQ音乐 已从遥控页单列控制区移除,改由常驻悬浮球(现含遥控页,
   三页签通吃)统一承载**;点歌抽屉支持搜索 + 触底分页;**演唱页音准块高亮对齐 PC(2026-07-15):
@@ -103,6 +115,9 @@
   (开唱前几秒居中显 歌名/原唱/演唱:主播名,渐隐后出歌词+音准线;演唱者=托盘可改的 `performer`,缓存+IPC 下发)。
   **手机版接入(2026-07-26)**:新增 `mobile_convert.py`——手机全民K歌三件套(hex-QRC / hex-`.oke` /
   QMCv1 加密 `.tkm`)→ PC 四件套(伴奏/原唱按 note 中置能量自动判);`assets.load_notes` 已能直接解 `.oke`。
+  **QQ音乐 源(2026-07-26)**:`assets._qrc_decrypt`/`library._qrc_meta` 新增**明文 QRC XML 分支**
+  (识别 `<?xml`/`<QrcInfos`/`LyricContent=` 直接返回)——QQ音乐 歌词经 API 已解密成明文,直接落盘 `.qrc`
+  即可读;QQ音乐 歌无音高,写**空 `.note`**(`load_notes` 返回空→不显音准线)。导入编排在 pc-service 侧。
   **做 K歌 大功能前先读根 [KARAOKE_SYSTEM.md](KARAOKE_SYSTEM.md)。**
 
 > 更细的历史与踩坑记录在各子项目 README 及 `live-remote/DEV_LOG.md`。

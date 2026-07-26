@@ -811,3 +811,79 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
 **验证**:`mobile_convert` 转「不由自主」→ `assets.Song` 断言 29 行/228 音符/伴奏 292.1s、accompany 中置能量比 0.494(=伴奏);
 `scan_pc`+`import_candidate`(改名/去重/swap)隔离测通;`mobile_import.scan_phone` 真机(emulator-5554)跑通,家乡(只缓存歌词)
 正确跳过;扫描窗口构建/渲染/poll 无异常。**改动需重启 pc-service 生效。**
+
+## 十八、QQ音乐 导入(补"特殊版只在 QQ音乐 有"的歌;2026-07-26)
+
+**目标**:个别特殊版/DJ版/KTV版只在 QQ音乐 有,要能扒**逐字歌词 + 伴奏(或原唱后续自分离)**进曲库。
+
+**调研过程(踩坑记录,免得后人重走)**:
+1. **歌词——离线可解**。PC 版歌词缓存在 `D:\QQMusicCache\QQMusicLyricNew\*_qm.qrc`,是二进制(非手机版 hex)。
+   本地封装比手机多一层:**`qmc1_decrypt(整文件 XOR 128字节 PRIVKEY) → 跳过前 11 字节 → buggy-3DES(同 QRC_KEY
+   `!@#)(*$%123ZXC!@!@#)(NHL`) → zlib`**。算法出自 chenmozhijin/**LDDC**(`core/decryptor/qmc1.py`+`__init__.py`),
+   而项目 `karaoke-player/tripledes.py` 正是同作者(`cmzj@cmzj.org`)的 buggy DES(sbox4 里著名的 `10,10` 重复 bug)。
+   实测解通多首(TFBOYS/赵雷KTV版等),逐字时间轴与 `assets.load_lyrics` 完全兼容。
+2. **音频——绕开了 QMCv2/ekey 这条深坑**。缓存音频 `downloadproxyNew\tp2p\...\*.mgg` 是 **QMCv2**(试 QMCv1 静态密钥解不出
+   OggS),且 **ekey 不本地持久化**(文件尾无 STag/musicex footer;`qmlist64.db` 被 QQ音乐 自己加密打不开;16.6 版无
+   freenote 那个 `MMKVStreamEncryptId` 明文 vault)。一度走"登录态 API 取 ekey(`music.vkey.GetEVkey`)+ `ybpyqmc` 解密",
+   但拿到的是 V1 型 ekey(704 base64→528 字节、开头 ASCII `gyV21gG4`),ybpyqmc 0.1.0 解出乱码。**转机**:改试**非加密音质**
+   发现——**本账号有会员权限时 QQ音乐 直接返回明文文件,根本不需要 ekey/解密**:
+   - `SpecialSongFileType.ACCOM` → **明文 OggS 伴奏 stem**(真·卡拉OK伴奏,269.7s 整首、与原唱采样数完全一致对齐)
+   - `SongFileType.FLAC`(退 MP3_320/128)→ 明文原唱;`SongFileType.*` 走 `GetVkey` 返回 `ID3`/`fLaC`/`ftyp` 明文
+   - `lyric.get_lyric(mid, qrc=True)` → 库内部已解密的**明文 QRC XML**(逐字),直接可用
+
+**实现**:
+- **登录态 API**:`qqmusic-api-python`(0.7.0,活跃维护;`Client().song/search/login/lyric`,异步)。扫码登录
+  (`login.get_qrcode(QRLoginType.QQ/WX/MOBILE)`+`check_qrcode` 轮询)存 `KaraokeLibrary/qq_cred.json`,复用/过期重扫。
+- **`pc-service/qqmusic_import.py`**:`login_qr()`/`search()`/`prepare()`。搜索轻量(仅元数据、去重排除库里已有);
+  **确认入库时才** `prepare()`:取 ACCOM 伴奏 url + 原唱 url(按 `config.QQ_ORIGINAL_QUALITY` 优先级)+ 歌词明文,
+  niquests 下载 → imageio-ffmpeg 转 44.1k/16bit 立体声 PCM → 与四件套一致的 XOR 加密写盘。有 ACCOM:伴奏=ACCOM、
+  原唱=FLAC(等长对齐);无 ACCOM:两轨都用原唱(主播再自分离)。**QQ音乐 无音高数据 → 写空 `.note`**
+  (`load_notes` 返回空→播放器不显音准线);歌词写明文 QRC XML。产出交 `library.import_candidate` 入库,下游零改动。
+- **明文 QRC 分支**:`karaoke-player/assets._qrc_decrypt` 和 `pc-service/library._qrc_meta` 各加一支——识别
+  `<?xml`/`<QrcInfos`/`LyricContent=` 开头即当已解密明文直接返回(不再走 hex/PC头 解密)。
+- **扫描窗改双页签**(`_open_scan_window`):`ttk.Notebook`——「K歌(带音准)」=原 PC+手机缓存扫描(控件全 reparent 进
+  tab 帧);「QQ(无音准)」=登录状态/登录类型下拉/登录·退出/搜索框 + 结果表(勾选/改歌名歌手/时长/QQ标)+ 确认入库。
+  各自 worker 线程 + `root.after` 轮询刷 UI(仿现有 `_do_scan`/`_poll`);二维码用 `tk.PhotoImage(data=base64)` 内嵌显示
+  (失败退回 `os.startfile` 打开临时 png);两页签滚动区改 `<Enter>/<Leave>` 时才 `bind_all` 滚轮,避免互抢。
+
+**验证**:登录(musicid=1165141611 扫码成功)→ 搜"周杰伦 晴天" 3 候选 → `prepare` 下 ACCOM+FLAC → 四件套
+(伴奏/原唱各 47.5MB 等长、空 .note、9.8KB 明文歌词)→ `assets.Song` 加载出 **63 行逐字歌词/0 音符/269.7s/原唱伴奏等长对齐**;
+`server._open_scan_window()` 冒烟:import + 双页签构建 + 6s 轮询无异常。**加密 QMCv2 路(ybpyqmc)本账号用不上,留作
+无明文音质时的备用,当前未接。改动需重启 pc-service 生效。**
+
+**首轮联调修正(2026-07-26)**:①**打开扫描窗不再自动扫描**(K歌页签去掉 open 时的 `_start_scan()`,改状态提示;
+点『重新扫描』/切设备才扫)。②**QQ 结果加 ▶试听**:`_qpreview()` worker 里 `prepare(cand, preview=True)`——
+**只下伴奏一轨**(优先 ACCOM 退原唱、两轨共用,省流量)写暂存,再复用 `_preview` 子进程播放;之后勾选入库会再下全量覆盖。
+③**列表默认全不选**(K歌 `_add_row`/QQ `_qadd_row` 的 `chk` 改 `value=False`)。④**修 QQ「确认入库」点了没反应**——
+根因是 `qconfirm_btn` 建了、`_qconfirm` 写了,但**漏了 `qconfirm_btn.config(command=_qconfirm)`** 没接上,补上即好。
+⑤**同名不同版分不清**(搜"船长"出两个"船长 赵雷"):候选标题改用 **`title`**(含"(Live)/(DJ阿树版)"版本后缀)兜底 `name`
+(`name`/`subtitle` 都不带后缀,后缀只在 `title`)。
+
+**下载慢的真因 + 提速(2026-07-26 补)**:试听/入库慢**不是代理**——实测 `getproxies()` 空、代码里 `Session.trust_env=False`
+关代理后速度**一模一样**(238 vs 239 KB/s),换 QQ音乐 UA / 去 `redirect=1` / 直连重定向目标也都 ~220KB/s。是 **QQ CDN 对
+vkey 授权流按连接限速**(单连接~210KB/s≈5倍实时码率,"够流畅播、防批量下")。**关键**:限速**按连接**——实测 3 连接并行
+达 634KB/s(线性 3 倍)。据此把 `_download` 改**并行分块**(`_DL_CONNS=5`,Range 0-0 探总长→分块并发→拼接;拿不到长度/
+量<512KB 退单连接)。再叠两招:试听只取开头 `_PREVIEW_MAX_BYTES=0.9MB`;**原唱默认音质降 FLAC→MP3_320**
+(`config.QQ_ORIGINAL_QUALITY`,~55MB→~10MB;原唱只作切换参考、MP3_320 够;想无损把 FLAC 提前)。伴奏仍 ACCOM ogg(~23MB)。
+**实测:试听 11s→3.7s、入库(晴天)79s→36s**(伴奏 24s+原唱 10s,均 269.7s 等长)。伴奏 24s 是 23MB@~1MB/s 的地板。
+
+**进度条 + 人声分离伴奏(2026-07-26 再补)**:
+- **下载进度条**:`_download` 加 `on_progress(done,total)`(并行各块增量经锁汇总);`prepare` 加 `pct_cb(label,pct)`
+  串到 QQ 页签——`qst["dl_pct"]`(None=转圈 / 0-100=百分比),`_qpoll` 据此把 `qprog` 在 indeterminate↔determinate 间切,
+  状态文字同显 "下载伴奏 45%"。登录/搜索/写盘等无百分比阶段仍转圈。
+- **无 ACCOM 的歌用 Demucs 分离出伴奏**:`SpecialSongFileType.ACCOM` 只有部分歌有(特殊版/Live/DJ 版常没有),没有时
+  原方案两轨都放原唱=听不到伴奏。现 `prepare` 无 ACCOM 时,若 `separation_available()`(装了 demucs)→
+  `separate_accompaniment(原唱pcm)`:**子进程**跑 `python -m demucs --two-stems vocals -n htdemucs`(torch 不常驻直播服务,
+  有 CUDA 自动用 GPU),取 `no_vocals.wav` 当伴奏。没装 demucs 则降级两轨都用原唱(不报错)。安装见 requirements.txt
+  可选段(CUDA torch + demucs)。原唱音质入库默认 MP3_320(见上),分离基于它。
+  **实测(2026-07-26)**:装 `torch 2.6.0+cu124 / demucs 4.1.0`(Python313),`separate_accompaniment` 端到端跑通
+  (56s 片段 CPU 50s、中置人声能量降到原唱 66%、输出等长)。**本机 NVIDIA 驱动过旧**(`cuda.is_available()=False`,报
+  "driver too old, found version 11060"=只到 CUDA 11.6,cu124 需 12.4),故**当前跑 CPU**(整首约 3-4 分钟);
+  **要 GPU(一首 15-30s)需更新显卡驱动**到支持 CUDA 12.x,之后 demucs 自动用 GPU、无需改代码。分离阶段 UI 走转圈。
+- **K歌页签扫描来源二选一(2026-07-26)**:原 `_do_scan` 一次扫 PC+手机两端,数据会互相掺。改顶部「扫描来源」单选
+  `电脑缓存 / 手机全民K歌`,`_do_scan(gen, serial, mode)` **只扫选中那端**;`_on_mode()` 切换时启用/禁用设备行(手机模式才启用
+  设备下拉+扫码连接)+ 刷提示;换设备只在手机模式自动重扫;扫码配对成功自动切手机模式。默认电脑模式、打开不自动扫描。
+- **曲库管理加「删除」(2026-07-26)**:每行末尾红色「删除」按钮(col7,窗宽 640→720)。点击 `messagebox.askyesno`
+  **二次确认**(不可恢复)→ `_lib_delete(mid)`:先 `set_setlist_member(mid,False)` 出歌单、从 `_queue` 摘除并 `_sync_queue_state`,
+  再 `library.delete(mid)`(删 `KaraokeLibrary/<mid>/` 整个四件套+meta + 清 `_MANIFEST`/library.json + `_on_lib_change` 刷托盘/推库)。
+  正在唱的歌已载进播放器内存,删文件不影响当前这遍。`library.delete` 用假 mid 隔离测过(目录/清单清掉、真库数不变)。

@@ -78,6 +78,17 @@ PC 版对用户自传/部分歌下不了伴奏;手机版能下。安卓(adb 可�
 转换器 `mobile_convert.py` 把手机三件套 → PC 四件套(伴奏/原唱按 note 时间轴**中置声道能量比**自动判:
 消了中置人声那条比值明显<1;实测伴奏 0.49 vs 原唱 1.0)。由 pc-service 的扫描导入窗口以子进程调用。
 
+## 数据来源:QQ音乐(2026-07-26 接入,补"特殊版只在 QQ音乐 有"的歌)
+
+走**登录态 API**(编排在 `pc-service/qqmusic_import.py`,详见 live-remote/DEV_LOG.md 第十八节)。关键:**有会员
+权限时非加密音质直接返回明文文件,不需要 ekey/QMCv2 解密**——`SpecialSongFileType.ACCOM`=明文 OggS **伴奏 stem**
+(与原唱等长对齐)、`SongFileType.FLAC`=明文原唱、`lyric.get_lyric(qrc=True)`=已解密**逐字 QRC XML**。产出与
+全民K歌四件套一致但 **减 `.note`**(QQ音乐 无音高数据→写空 `.note`,`load_notes` 返回空、播放器不显音准线)。
+- 播放器侧唯一改动:**`assets._qrc_decrypt` 新增明文 QRC 分支**——识别 `<?xml`/`<QrcInfos`/`LyricContent=`
+  开头即当已解密明文直接返回(QQ音乐 歌词经 API 已解密成明文,直接落盘 `.qrc`)。手机/PC WeSing 的加密 QRC 走原路。
+- 备用:PC 本地 `QQMusicCache\QQMusicLyricNew\*_qm.qrc` 可**离线**解(`qmc1_decrypt 整文件XOR PRIVKEY → 跳11字节
+  → buggy-3DES(同 QRC_KEY) → zlib`,算法出自 chenmozhijin/LDDC,与本项目 `tripledes.py` 同源);当前导入用 API 歌词。
+
 ---
 
 ## 代码结构
