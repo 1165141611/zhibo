@@ -3,21 +3,24 @@
 
 与全民K歌导入的区别:QQ音乐 是**在线搜索**流(ekey 不本地持久化,靠登录态问服务器),
 不是扫本地缓存。且**不需要解密**——本账号有会员权限时,非加密音质直接返回明文文件:
-  - 伴奏:`SpecialSongFileType.ACCOM` → 明文 OggS(真·卡拉OK伴奏 stem,与原唱等长对齐)
   - 原唱:`SongFileType.FLAC`(退 MP3_320/MP3_128)→ 明文
   - 歌词:`lyric.get_lyric(mid, qrc=True)` → 库内部已解密的**明文 QRC XML**(逐字)
+**伴奏由原唱经 Demucs 人声分离制作,不取 QQ 的 ACCOM stem**:实测 `SpecialSongFileType.ACCOM`
+对 **Live/特殊版常返回另一版原唱**(仍带人声、非伴奏),不可靠;QQ音乐 本就"不带真伴奏",故统一
+**保留高质量原唱 + Demucs 分离出伴奏**(见 prepare / separate_accompaniment)。
 QQ音乐 不提供音高数据,故产出四件套**减 .note**(写空文件,load_notes 返回空→播放器不显音准线)。
 
 流程:
   login_qr()  一次性扫码登录(凭据存 config.QQ_CRED_PATH,复用/过期重扫)
   search()    在线搜索 → 轻量候选(仅元数据,秒回;去重:库里已有的 mid 跳过)
-  prepare()   **确认入库时才跑**:下 ACCOM 伴奏 + 原唱 + 歌词 → ffmpeg 转 PCM → 写四件套到暂存
+  prepare()   **确认入库时才跑**:下高质量原唱 + 歌词 → ffmpeg 转 PCM → Demucs 分离伴奏 → 写四件套到暂存
   然后交给 library.import_candidate(cand, title, artist) 拷进曲库(与 PC/手机来源同一入口)。
 
 依赖:qqmusic-api-python(登录态 API)、imageio-ffmpeg、numpy、niquests。见 requirements.txt。
 凭据/私有数据仅本机自用,勿分发(见 CLAUDE.md)。
 """
 import os
+import re
 import sys
 import time
 import asyncio
@@ -37,8 +40,7 @@ _PCMKEY = np.frombuffer(PCM_XOR_KEY, dtype=np.uint8)
 
 from qqmusic_api import Client, Credential                                   # noqa: E402
 from qqmusic_api.modules.search import SearchType                            # noqa: E402
-from qqmusic_api.modules.song import (                                       # noqa: E402
-    SongFileInfo, SongFileType, SpecialSongFileType)
+from qqmusic_api.modules.song import SongFileInfo, SongFileType             # noqa: E402
 from qqmusic_api.models.login import QRLoginType, QRCodeLoginEvents          # noqa: E402
 
 SAMPLE_RATE = 44100
@@ -49,6 +51,61 @@ _NO_WINDOW = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW:pythonw �
 # 无歌词(纯音乐/接口空)时的占位 QRC(明文,load_lyrics/_qrc_meta 都能读,解析出 0 行)
 _EMPTY_QRC = ('<?xml version="1.0" encoding="utf-8"?>\n<QrcInfos>\n'
               '<LyricInfo LyricCount="0"></LyricInfo>\n</QrcInfos>')
+
+# QQ音乐 QRC 的 LyricContent 里混着两类**带时间戳但不是真歌词的信息行**:
+#   1) 歌名行:`[0,dur]歌名 (Live版) - 歌手`(总在第一条,含 ' - ' 分隔与歌手名)。
+#   2) 制作署名:`角色:人名` 式带冒号短句(`词:xxx` `曲:xxx` `音乐总监/指挥:陈伟伦` `吉他:磊子`
+#      `混音:姜北生` `管弦乐:xxx` …),**成块塞在前奏和尾奏**——不只开头,尾奏也有一大串。
+# 这些行会被播放器当歌词唱出来(且歌名行把首句起点顶到 0ms 害开头标题卡不显)。入库(prepare)与
+# 修库(clean_library_lyrics)都剥掉,让 QQ 歌与全民K歌歌统一:纯歌词 + 开头大字标题卡。
+_QQ_TIMED_LINE_RE = re.compile(r'^\[(\d+),(\d+)\](.*)$')
+_SENT_END_RE = re.compile(r'[。!?…！？~～]')     # 句末标点:有则更像叙述性歌词,不当署名删
+
+
+def _looks_like_credit(text):
+    """判一行(去时间戳的纯文字)是否是"角色:人名"式**制作署名短句**(任意位置都算)。
+    命中条件:含中/英文冒号,冒号左(角色)1-15 字且只含中英文/数字/斜杠顿号&·空格(职务名、无句读),
+    冒号右(人名,可空、可 /、,& 分隔多人)≤24 字且干净,整行无句末标点。真歌词几乎不含冒号,
+    加这些结构约束基本不会误删'她说:…'这类叙述句(通常更长/带句末标点)。"""
+    text = text.strip()
+    m = re.match(r'^([^:：]{1,15})[:：](.*)$', text)
+    if not m:
+        return False
+    role, name = m.group(1).strip(), m.group(2).strip()
+    if not role or _SENT_END_RE.search(text) or len(name) > 24:
+        return False
+    if not re.fullmatch(r'[0-9A-Za-z一-鿿/、&·\s]+', role):
+        return False
+    if name and not re.fullmatch(r'[0-9A-Za-z一-鿿/、,，&·\.\s]+', name):
+        return False
+    return True
+
+
+def _strip_qq_meta(lyric_xml, artist=""):
+    """从 QQ音乐 明文 QRC XML 里剥掉**信息行**:①歌名行(第一条带时间戳的行,靠 ' - ' 或含歌手名识别);
+    ②任意位置的"角色:人名"式制作署名(`_looks_like_credit`,含前奏/尾奏成块的词曲/乐手/混音等署名)。
+    只留真正的逐字歌词。头部 `[ti:]/[ar:]/[al:]/[offset:]` 等非时间行原样保留(解析器本就忽略)。
+    artist:识别歌名行的辅助信号(歌名行通常含歌手名);无也能靠 ' - ' 识别。"""
+    m = re.search(r'LyricContent="(.*?)"\s*/>', lyric_xml, re.S)
+    if not m:
+        return lyric_xml
+    content = m.group(1)
+    artist = (artist or "").strip()
+    out = []
+    first_timed = True       # 歌名行判定只对第一条带时间戳的行生效
+    for ln in content.split("\n"):
+        lm = _QQ_TIMED_LINE_RE.match(ln)
+        if lm is None:
+            out.append(ln)   # 头部 [ti:]/[ar:]/[offset:] 等,保留
+            continue
+        text = re.sub(r"\(\d+,\d+\)", "", lm.group(3)).strip()   # 去逐字时间戳取纯文字
+        is_title = first_timed and ((" - " in text) or (artist and artist in text))
+        first_timed = False
+        if is_title or _looks_like_credit(text):
+            continue         # 丢掉信息行(歌名行 / 制作署名),任意位置
+        out.append(ln)
+    cleaned = "\n".join(out)
+    return lyric_xml[:m.start(1)] + cleaned + lyric_xml[m.end(1):]
 
 
 # ================================================================ 异步桥
@@ -186,13 +243,13 @@ async def _one_url(c, mid, media_mid, song_type, ft, cred):
 
 
 async def _fetch_urls_and_lyric(mid, media_mid, song_type, original_quality=None):
-    """一次性取:伴奏 url(可能空)、原唱 url(按音质优先级取第一个明文)、歌词明文 XML。
+    """一次性取:原唱 url(按音质优先级取第一个明文)、歌词明文 XML。
+    不取 QQ 的 ACCOM 伴奏 stem(对 Live/特殊版常返回另一版原唱,不可靠;伴奏改由 Demucs 从原唱分离)。
     original_quality:原唱音质优先级列表(试听传 ['MP3_128'] 省流量;None=用 config.QQ_ORIGINAL_QUALITY)。"""
     c = Client()
     cred = load_credential()
     c.credential = cred
     try:
-        accom = await _one_url(c, mid, media_mid, song_type, SpecialSongFileType.ACCOM, cred)
         original, orig_ext = "", ".mp3"
         for qn in (original_quality or config.QQ_ORIGINAL_QUALITY):
             ft = getattr(SongFileType, qn, None)
@@ -206,7 +263,7 @@ async def _fetch_urls_and_lyric(mid, media_mid, song_type, original_quality=None
             lyr = (await c.lyric.get_lyric(mid, qrc=True)).lyric or ""
         except Exception:
             lyr = ""
-        return {"accom": accom, "original": original, "orig_ext": orig_ext, "lyric": lyr}
+        return {"original": original, "orig_ext": orig_ext, "lyric": lyr}
     finally:
         await c.close()
 
@@ -396,9 +453,9 @@ def separate_accompaniment(pcm_int16, progress_cb=None, pct_cb=None):
 
 def prepare(cand, progress_cb=None, preview=False, pct_cb=None):
     """下载并转换成四件套(减 .note)到 QQ_STAGING_DIR/<mid>/。
-    - 入库(preview=False):有 ACCOM→伴奏=ACCOM、原唱=MP3_320(等长对齐);无 ACCOM→(装了 Demucs 则)人声分离出伴奏,
-      否则两轨都用原唱。
-    - 试听(preview=True):**只下一轨**(优先伴奏,退原唱),两轨共用,省流量/加快;够 preview_play 播伴奏。
+    - 入库(preview=False):**原唱=高质量 FLAC(config.QQ_ORIGINAL_QUALITY),伴奏=Demucs 从原唱分离**
+      (QQ 无可靠伴奏 stem);未装 Demucs 才降级两轨都用原唱(占位,可后续手动分离)。
+    - 试听(preview=True):**只下原唱开头片段**,两轨共用,省流量/加快;够 preview_play 出声(不做分离)。
     progress_cb(text):阶段文字;pct_cb(label, pct):当前下载文件百分比(驱动进度条)。
     完成后目录满足 library.import_candidate 的拷贝契约。"""
     def prog(m):
@@ -418,45 +475,87 @@ def prepare(cand, progress_cb=None, preview=False, pct_cb=None):
     os.makedirs(dst, exist_ok=True)
 
     prog("取地址…")
-    # 试听:无伴奏时回退原唱用最小的 MP3_128(省流量、下得快),入库用 config.QQ_ORIGINAL_QUALITY
+    # 试听用最小的 MP3_128(省流量、下得快),入库用 config.QQ_ORIGINAL_QUALITY(FLAC 无损优先)
     info = _fetch_urls_and_lyric_sync(cand, ["MP3_128"] if preview else None)
+    if not info["original"]:
+        raise RuntimeError("该歌曲拿不到可下载原唱(可能无版权/需更高会员)")
 
     if preview:
-        # 只下开头 ~0.9MB(Range),截断音频照样解码,试听秒级出声
-        if info["accom"]:
-            one = _dl(info["accom"], ".ogg", "下载伴奏(试听)", max_bytes=_PREVIEW_MAX_BYTES)
-        elif info["original"]:
-            one = _dl(info["original"], info["orig_ext"], "下载原唱(试听)", max_bytes=_PREVIEW_MAX_BYTES)
-        else:
-            raise RuntimeError("该歌曲拿不到可试听音频(可能无版权/需更高会员)")
+        # 只下原唱开头 ~0.9MB(Range),截断音频照样解码,试听秒级出声(不做分离)
+        one = _dl(info["original"], info["orig_ext"], "下载原唱(试听)", max_bytes=_PREVIEW_MAX_BYTES)
         accompany = kongsinger = one
     else:
-        acc_pcm = orig_pcm = None
-        if info["accom"]:
-            acc_pcm = _dl(info["accom"], ".ogg", "下载伴奏")
-        if info["original"]:
-            orig_pcm = _dl(info["original"], info["orig_ext"], "下载原唱")
-        if acc_pcm is None and orig_pcm is None:
-            raise RuntimeError("该歌曲拿不到可下载音频(可能无版权/需更高会员)")
-        kongsinger = orig_pcm if orig_pcm is not None else acc_pcm
-        if acc_pcm is not None:
-            accompany = acc_pcm                       # QQ 官方伴奏 stem,最佳
-        elif separation_available() and orig_pcm is not None:
+        # QQ音乐 无可靠伴奏 stem(ACCOM 对 Live/特殊版返回另一版原唱),故:留高质量原唱 + Demucs 分离伴奏
+        orig_pcm = _dl(info["original"], info["orig_ext"], "下载原唱")
+        kongsinger = orig_pcm
+        if separation_available():
             accompany = separate_accompaniment(orig_pcm, progress_cb=progress_cb, pct_cb=pct_cb)
         else:
-            accompany = orig_pcm                       # 无伴奏也没装分离:两轨都用原唱
+            prog("未装 Demucs,无法分离伴奏 → 暂用原唱占位(装 demucs 后重导可得伴奏)")
+            accompany = orig_pcm                       # 没装分离:两轨都用原唱(降级占位)
 
     prog("写伴奏…")
     _write_pcm(accompany, os.path.join(dst, mid + "_accompany.pcm"))
     prog("写原唱…")
     _write_pcm(kongsinger, os.path.join(dst, mid + "_kongsinger.pcm"))
-    # 空音准(QQ音乐 无音高数据)+ 明文逐字歌词
+    # 空音准(QQ音乐 无音高数据)+ 明文逐字歌词(先剥掉开头歌名/词曲署名等信息行,见 _strip_qq_meta)
     open(os.path.join(dst, mid + ".note"), "w", encoding="utf-8").close()
+    lyric = _strip_qq_meta(info["lyric"], cand.get("artist", "")).strip() or _EMPTY_QRC
     with open(os.path.join(dst, mid + ".qrc"), "w", encoding="utf-8", newline="\n") as f:
-        f.write(info["lyric"].strip() or _EMPTY_QRC)
+        f.write(lyric)
     return cand
 
 
 def _fetch_urls_and_lyric_sync(cand, original_quality=None):
     return _run(_fetch_urls_and_lyric(cand["mid"], cand.get("media_mid", ""),
                                       cand.get("song_type", 0), original_quality))
+
+
+# ================================================================ 修库(清歌词信息行)
+def clean_library_lyrics():
+    """一次性修库:把曲库里 QQ音乐 来源歌曲(判据:.note 为空 + .qrc 是明文 QRC XML)开头
+    残留的信息行(歌名/词曲署名)剥掉,重写 .qrc。全民K歌歌(.note 非空/密文 QRC)不碰。
+    返回被修改的 mid 列表。供 pc-service 启动迁移或手动调用修复历史入库的 QQ 歌。"""
+    import json
+    changed = []
+    root = config.KARAOKE_LIBRARY_DIR
+    try:
+        mids = os.listdir(root)
+    except OSError:
+        return changed
+    for mid in mids:
+        d = os.path.join(root, mid)
+        qp = os.path.join(d, mid + ".qrc")
+        np_ = os.path.join(d, mid + ".note")
+        if not (os.path.isdir(d) and os.path.isfile(qp) and os.path.isfile(np_)):
+            continue
+        if os.path.getsize(np_) != 0:            # .note 非空 → 全民K歌歌,不碰
+            continue
+        try:
+            raw = open(qp, "rb").read()
+        except OSError:
+            continue
+        s = raw.lstrip()
+        if not (s[:5] == b"<?xml" or b"<QrcInfos" in raw[:200] or b"LyricContent=" in raw[:400]):
+            continue                             # 不是明文 QRC XML → 非 QQ 源,不碰
+        xml = raw.decode("utf-8", "replace")
+        artist = ""
+        mp = os.path.join(d, "meta.json")
+        if os.path.isfile(mp):
+            try:
+                artist = (json.load(open(mp, encoding="utf-8")).get("artist") or "").strip()
+            except Exception:
+                artist = ""
+        cleaned = _strip_qq_meta(xml, artist)
+        if cleaned != xml:
+            with open(qp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(cleaned)
+            changed.append(mid)
+    return changed
+
+
+if __name__ == "__main__":
+    # 手动修库:python qqmusic_import.py --clean-lyrics
+    if "--clean-lyrics" in sys.argv:
+        done = clean_library_lyrics()
+        print("已清理 %d 首 QQ 歌的歌词信息行:" % len(done), done)

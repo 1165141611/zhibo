@@ -94,9 +94,10 @@ PREVIEW_PLAY_PATH   = _os.path.join(KARAOKE_DIR, "preview_play.py")  # 扫描窗
 PREVIEW_VOLUME      = 0.4           # 预览音量(走系统默认输出=自己听的通道,压低不吵)
 
 # ── QQ音乐 导入(qqmusic_import.py:登录态 API 搜索 + 下明文伴奏/原唱,无音准)──
-# 扫描窗口「QQ(无音准)」页签用:扫码登录一次 → 搜索 → 勾选 → 下载 ACCOM 伴奏(明文 OggS)
-# + FLAC/MP3 原唱(明文)→ ffmpeg 转 PCM → 写四件套(减 .note)入库。凭据存本机自用,勿外传。
+# 扫描窗口「QQ(无音准)」页签用:扫码登录一次 → 搜索 → 勾选 → 下载高质量原唱(明文 FLAC/MP3)
+# → ffmpeg 转 PCM → **Demucs 人声分离出伴奏** → 写四件套(减 .note)入库。凭据存本机自用,勿外传。
 QQ_CRED_PATH        = _os.path.join(KARAOKE_LIBRARY_DIR, "qq_cred.json")   # 登录凭据(cookie)
 QQ_STAGING_DIR      = _os.path.join(KARAOKE_LIBRARY_DIR, "_qq_staging")    # 下载+转换暂存
-QQ_ORIGINAL_QUALITY = ("MP3_320", "MP3_128", "FLAC")   # 原唱音质优先级(取第一个能出明文的)。
-# 默认 MP3_320(~10MB,够原唱切换参考、下得快);想无损原唱把 FLAC 提前(~55MB,慢)。伴奏走 ACCOM ogg 不受此影响。
+QQ_ORIGINAL_QUALITY = ("FLAC", "MP3_320", "MP3_128")   # 原唱音质优先级(取第一个能出明文的)。
+# 默认 **FLAC 无损优先**(~55MB,慢些):原唱既是切换参考、又是 Demucs 分离伴奏的输入源,质量要高;
+# 拿不到无损再退 MP3_320/128。(QQ音乐 无可靠伴奏 stem,伴奏一律由此原唱经 Demucs 分离,见 qqmusic_import。)

@@ -59,9 +59,14 @@
   不再用无方向的全局媒体键(会被抢占系统当前会话的 App 截走)。
   **QQ音乐 导入曲库(2026-07-26)**:补"特殊版只在 QQ音乐 有"的歌。走**登录态 API**
   (`qqmusic-api-python`,扫码登录存 `KaraokeLibrary/qq_cred.json`),关键发现:**有会员权限时非加密音质
-  直接返回明文文件,不需要 ekey/QMCv2 解密**——`SpecialSongFileType.ACCOM`=明文 OggS 伴奏 stem(真·卡拉OK
-  伴奏,与原唱等长对齐)、`SongFileType.FLAC`=明文原唱、`lyric.get_lyric(qrc=True)`=已解密逐字 QRC XML。
-  产出与全民K歌四件套一致但**减 `.note`**(QQ音乐 无音高数据→无音准线)。编排见 `pc-service/qqmusic_import.py`,
+  直接返回明文文件,不需要 ekey/QMCv2 解密**——`SongFileType.FLAC`=明文原唱、`lyric.get_lyric(qrc=True)`=
+  已解密逐字 QRC XML。**伴奏不取 QQ 的 `SpecialSongFileType.ACCOM`**:实测它对 **Live/特殊版常返回另一版原唱**
+  (仍带人声、非伴奏),不可靠;QQ音乐 本就"不带真伴奏",故统一**保留高质量 FLAC 原唱 + Demucs 人声分离出伴奏**
+  (2026-07-28 改;`config.QQ_ORIGINAL_QUALITY` 无损优先)。产出与全民K歌四件套一致但**减 `.note`**(QQ音乐 无音高数据→
+  无音准线)。**入库前剥掉 QRC 的信息行**
+  (歌名行 `[0,dur]歌名 (Live版) - 歌手`,首句起点被它顶到 0ms 害开头标题卡不显;+ **前奏/尾奏成块的"角色:人名"式
+  制作署名** `词:/曲:/音乐总监/指挥:/吉他:/混音:…`,否则会被当歌词唱出。`_strip_qq_meta`/`_looks_like_credit` 任意位置删,
+  历史入库用 `qqmusic_import.py --clean-lyrics` 修)。编排见 `pc-service/qqmusic_import.py`,
   接在托盘「扫描导入歌曲」窗口的 **QQ(无音准)页签**(登录+搜索+勾选+下载解码入库)。**歌词也扒到了**:PC 本地
   `QQMusicCache/QQMusicLyricNew/*_qm.qrc` 可离线解(`qmc1_decrypt 整文件XOR PRIVKEY → 跳11字节 → buggy-3DES
   (同 QRC_KEY) → zlib`,算法出自 chenmozhijin/LDDC,与项目 tripledes 同源);当前导入走 API 歌词,本地缓存解法备用。
@@ -91,7 +96,7 @@
   loading 动画 + adb 设备下拉(默认第一台)+ 连接状态。手机歌转成与 PC 一致四件套,下游零改动。
   **扫描窗改双页签(2026-07-26)**:`ttk.Notebook` —「K歌(带音准)」=原 PC+手机缓存双端扫描;
   「QQ(无音准)」=QQ音乐 在线搜索(扫码登录 + 搜索框 + 结果勾选 + 可改歌名/歌手),**确认入库时才**
-  下载 ACCOM 伴奏 + FLAC 原唱 + 逐字歌词、ffmpeg 转 PCM、写四件套(减 note)。见上『三·QQ音乐 导入』
+  下载 FLAC 原唱 + 逐字歌词、ffmpeg 转 PCM、**Demucs 分离出伴奏**、写四件套(减 note)。见上『三·QQ音乐 导入』
   与 `qqmusic_import.py`。去重复用 `library.manifest()`;凭据/暂存在 `config.QQ_CRED_PATH/QQ_STAGING_DIR`。
 - **LiveRemote**:安卓原生 App(Compose,演唱/队列/遥控三页签),遥控页含声卡场景 + 窗口开关
   (Studio One / K歌歌词 / 音准线显隐);**QQ音乐 已从遥控页单列控制区移除,改由常驻悬浮球(现含遥控页,
