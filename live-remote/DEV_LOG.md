@@ -968,3 +968,38 @@ vkey 授权流按连接限速**(单连接~210KB/s≈5倍实时码率,"够流畅�
   (`.qrc`/`.note`/`meta.json`/`library.json` 不动,避开运行中 pc-service 抢清单)。**代价**:每首入库多花整首 Demucs 时间
   (本机无 CUDA 走 CPU,约 3-4 分钟/首),换来真伴奏;有真·官方伴奏的歌(如个别正常版)也一并走分离,牺牲那点质量换一致可靠。
   改动需重启 pc-service 对下次新导入生效(库文件已就地修好,播放器下次载歌即用)。
+
+## 十九、托盘子窗口"开窗要等好几秒/卡顿"根治 —— 常驻单 Tk 根 + 延迟构建(2026-07-28)
+
+**症状**:从托盘打开「曲库管理」「扫描导入歌曲」等子窗口时明显发慢、偶尔要等好几秒才出图。
+
+**根因(三处叠加)**:
+1. **每开一个窗都新建 `tk.Tk()`**:各窗口原本各在自己的后台线程 `tk.Tk()` 建一个全新 Tcl/Tk 解释器
+   再跑独立 `mainloop()`。实测冷建 `tk.Tk()+ttk` ~169ms/次(首个窗还要一次性付 Tcl/Tk DLL 加载 + 系统
+   字体枚举);窗口一关即销毁,故**每次打开都重付**这份成本。多 `tk.Tk()` 根跨解释器还脆(到处 `master=root`)。
+2. **扫描窗在 Tk 线程上同步 `import qqmusic_import`**:连带 numpy/niquests/qqmusic_api 一串冷导入(空闲实测
+   合计 ~0.7s+,实运行 GIL 负载下更久),且 QQ 页签本体也当场全搭完才首次绘制 → **首开扫描窗卡好几秒的主因**。
+3. **曲库窗显示前同步渲首批 60 行**(每行约 6 控件 = 360+ 控件),压在首帧前建 → 首帧再卡几百 ms。
+
+**修法**:
+- **A. 启动预热 QQ 导入**:`main()` 起后台线程 `_prewarm_qqmusic()` 先 `import qqmusic_import`,填进 sys.modules;
+  日后 QQ 页签构建时的 import 变瞬时命中。
+- **B. QQ 页签延迟构建**:扫描窗只即时建「K歌」页签;「QQ」页签的控件 + `_qpoll` 轮询挪进 `_build_qq_tab_impl()`,
+  由 `<<NotebookTabChanged>>` 在**用户第一次切到 QQ 页签**时才建(不用就不建、也不 import)。
+- **C. 曲库窗先出壳再灌行**:初次 `refresh()` 改 `root.after_idle(refresh)`,让窗壳 + 工具栏先出图,60 行放到 idle 再渲。
+- **D. 常驻单 Tk 根 + 窗口做 Toplevel**(架构层):新增 `_ui_thread_main()`——一个守护线程建**一个隐藏 `tk.Tk()` 根**
+  (`withdraw()`)并跑**唯一的 `mainloop()`;所有窗口(曲库/扫描/改名/演唱者)改成它的 `Toplevel`,开窗只建 Toplevel
+  (几十 ms),再开近乎瞬时。**跨线程只用队列**:托盘/后台线程把"建/毁窗口"可调用丢进 `_ui_queue`,由 UI 线程自己的
+  周期 `after` 定时器 `_drain` 抽取执行——**绝不从别的线程直接碰 Tcl**(那正是 `Tcl_Panic` 崩溃的来源)。
+
+**GC 崩溃防护沿用**(见 `_tk_gc_enter/exit` 老注释:循环 GC 在别的线程 finalize tk 对象 → `Tcl_Panic` 硬崩):
+改由 `_tk_win_close_guard(root, on_closed)` 接管——窗一开 `_tk_gc_enter()` 禁 GC(引用计数,多窗安全),窗**真正销毁**
+(只认 root 自身 `<Destroy>`,过滤子控件事件)时在**本 UI 线程** `gc.collect()` 清本窗遗留 tk 循环、再 `_tk_gc_exit()` 恢复,
+并跑 `on_closed`(清 `_lib_root/_scan_root` 勾选态 + 刷托盘)。**隔离复现验证**:并发开两窗→gc depth 1→2(禁用)、
+逐一关窗→2→1→0(归零重启用),其间别的线程 `gc.collect()` 无 `Tcl_Panic`,进程正常结束。
+
+**保留**:`_open_library_browser(selftest=True)` 的 headless 自检仍走独立 `tk.Tk()`+自带 `mainloop`(不依赖常驻 UI 线程)。
+托盘勾选态仍用 `_lib_root/_scan_root is not None` 判断(现指向 Toplevel,关窗由 `<Destroy>` 善后置 None)。
+
+**教训**:长驻托盘服务里反复弹的 Tk 窗口,别每次 `tk.Tk()` 重建解释器——常驻单根 + Toplevel 复用最省;跨线程操作 Tk 一律
+走"UI 线程自有定时器抽队列",不跨线程碰 Tcl;窗口里的重导入(numpy/网络库)预热到后台线程,别压在 Tk 线程首帧前。

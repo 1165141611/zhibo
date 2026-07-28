@@ -23,6 +23,7 @@ import threading
 import subprocess
 import warnings
 import gc
+import queue
 import concurrent.futures
 
 warnings.filterwarnings("ignore")  # 屏蔽 pycaw 对未接入设备的无害 COMError 警告
@@ -95,6 +96,90 @@ def _tk_gc_exit():
         _tk_gc_depth = max(0, _tk_gc_depth - 1)
         if _tk_gc_depth == 0:
             gc.enable()
+
+
+# ── 常驻 UI 根:所有 Tk 窗口共用**一个隐藏根 + 单 mainloop**(自己的守护线程),各窗口都做它的
+#    Toplevel。旧版每开一个窗都新建 `tk.Tk()`(冷启动 ~170ms/次 + 首个窗还要付 Tcl/Tk DLL、系统
+#    字体枚举的一次性开销),且多 Tk() 根跨解释器易踩坑(故到处 `master=root`)。改为常驻单根后:
+#    ①开窗只建 Toplevel(几十 ms),再开近乎瞬时;②全进程只有一个解释器,跨根隐患消失。
+#    **跨线程调度只用队列**:托盘线程/后台线程把"建/毁窗口"的可调用丢进 _ui_queue,由 UI 线程
+#    自己的周期 after 定时器抽取执行——绝不从别的线程直接碰 Tcl(那正是 Tcl_Panic 的来源)。
+#    GC 崩溃防护沿用引用计数(见 _tk_gc_enter/exit):窗口一开就禁 GC、全关了在 UI 线程 collect 再恢复。
+_ui_root = None
+_ui_thread_id = None
+_ui_queue = queue.Queue()
+_ui_ready = threading.Event()
+
+
+def _ui_thread_main():
+    global _ui_root, _ui_thread_id
+    import tkinter as tk
+    _ui_root = tk.Tk()
+    _ui_root.withdraw()                     # 根本身永不显示,只做所有窗口的宿主
+    _ui_thread_id = threading.get_ident()
+
+    def _drain():
+        while True:                         # 抽干队列里排到的建/毁窗口任务(都在本 UI 线程跑)
+            try:
+                fn = _ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception as e:
+                print("[UI] 窗口任务异常:", e)
+        _ui_root.after(30, _drain)
+    _ui_root.after(30, _drain)
+    _ui_ready.set()
+    _ui_root.mainloop()
+
+
+def _start_ui_thread():
+    """启动常驻 UI 线程(建隐藏根 + 单 mainloop)。幂等:已起则直接返回。"""
+    if _ui_ready.is_set():
+        return
+    threading.Thread(target=_ui_thread_main, daemon=True, name="tk-ui").start()
+    _ui_ready.wait(5)
+
+
+def _ui_post(fn):
+    """把一个建/毁 Tk 窗口的可调用投到常驻 UI 线程执行(唯一合法的跨线程入口)。"""
+    _start_ui_thread()
+    _ui_queue.put(fn)
+
+
+def _tk_win_close_guard(root, on_closed):
+    """给一个窗口 Toplevel 装"关闭善后":窗一开就 _tk_gc_enter()(禁 GC),真正销毁(root 自身
+    <Destroy>)时在**本 UI 线程** gc.collect() 清掉本窗遗留的 tk 循环、再 _tk_gc_exit() 恢复引用计数,
+    并跑 on_closed(清全局勾选态 + 刷托盘)。**只认 root 自身的 <Destroy>**(过滤子控件销毁事件)。
+    调用时机:窗口所有控件建好后调一次即可。"""
+    _tk_gc_enter()
+    done = {"v": False}
+
+    def _on_destroy(e):
+        if e.widget is not root or done["v"]:
+            return
+        done["v"] = True
+        try:
+            on_closed()
+        except Exception as ex:
+            print("[UI] 关窗善后异常:", ex)
+        try:
+            gc.collect()                    # 本 UI 线程回收本窗 tk 循环(别留给后台线程 → 免 Tcl_Panic)
+        except Exception:
+            pass
+        _tk_gc_exit()
+    root.bind("<Destroy>", _on_destroy)
+
+
+def _prewarm_qqmusic():
+    """启动时后台预热 `import qqmusic_import`(连带 numpy/niquests/qqmusic_api,冷导入合计 ~0.7s+,
+    实运行 GIL 负载下更久)。预热后填进 sys.modules,QQ 页签首次构建时的 import 变成瞬时命中,
+    不再让扫描窗在 Tk 线程上同步等这一串导入(那正是"打开扫描窗要卡好几秒"的主因)。"""
+    try:
+        import qqmusic_import  # noqa: F401
+    except Exception as e:
+        print("[QQ] 预热导入失败(打开 QQ 页签时再试):", e)
 
 
 def _tk_window_thread(fn):
@@ -1342,28 +1427,29 @@ def _toggle_studio_visible():
     return STATE["studio_visible"]
 
 
+def _safe_destroy(w):
+    """在 UI 线程上安全销毁一个窗口(已销毁/无效则忽略)。"""
+    try:
+        w.destroy()
+    except Exception:
+        pass
+
+
 def _toggle_library_window(icon=None, item=None):
-    """托盘「曲库」:未开→开;已开→关窗(单实例,绝不重复开)。勾选态随 _lib_root 反映(见 _win)。"""
-    global _lib_root
+    """托盘「曲库」:未开→开;已开→关窗(单实例,绝不重复开)。勾选态随 _lib_root 反映(见 _win)。
+    开/关都投到常驻 UI 线程执行(不再从托盘线程跨线程碰 Tcl)。"""
     r = _lib_root
     if r is not None:
-        try:
-            r.after(0, r.destroy)          # 已开 → 关(Tk 调用 marshal 回它自己线程)
-        except Exception:
-            _lib_root = None; refresh_tray()
+        _ui_post(lambda w=r: _safe_destroy(w))   # 关窗:<Destroy> 善后会清 _lib_root + 刷托盘
     else:
         _open_library_browser()
 
 
 def _toggle_scan_window(icon=None, item=None):
     """托盘「扫描导入歌曲」:未开→开;已开→关窗(单实例)。勾选态随 _scan_root 反映。"""
-    global _scan_root
     r = _scan_root
     if r is not None:
-        try:
-            r.after(0, r.destroy)
-        except Exception:
-            _scan_root = None; refresh_tray()
+        _ui_post(lambda w=r: _safe_destroy(w))
     else:
         _open_scan_window()
 
@@ -1469,17 +1555,17 @@ def _open_rename_dialog(mid):
     def _dlg():
         try:
             import tkinter as tk
-            root = tk.Tk()
+            root = tk.Toplevel(_ui_root)
             root.title("修改歌名 · K歌曲库")
             root.attributes("-topmost", True)
             root.resizable(False, False)
             _build_edit_form(root, mid, on_saved=None)
+            _tk_win_close_guard(root, on_closed=lambda: None)
             root.after(120, root.focus_force)
-            root.mainloop()
         except Exception as ex:
             print(f"[LIB] 改名对话框失败: {ex}")
 
-    threading.Thread(target=_tk_window_thread(_dlg), daemon=True).start()
+    _ui_post(_dlg)
 
 
 def _open_performer_dialog():
@@ -1488,7 +1574,7 @@ def _open_performer_dialog():
     def _dlg():
         try:
             import tkinter as tk
-            root = tk.Tk()
+            root = tk.Toplevel(_ui_root)
             root.title("演唱者 · 直播")
             root.attributes("-topmost", True)
             root.resizable(False, False)
@@ -1512,13 +1598,13 @@ def _open_performer_dialog():
             tk.Button(root, text="保存", width=10, command=_ok).grid(
                 row=1, column=1, padx=10, pady=(0, 12), sticky="e")
             root.bind("<Return>", _ok)
+            _tk_win_close_guard(root, on_closed=lambda: None)
             root.after(120, root.focus_force)
             root.after(150, e.focus_set)
-            root.mainloop()
         except Exception as ex:
             print(f"[PERF] 演唱者对话框失败: {ex}")
 
-    threading.Thread(target=_tk_window_thread(_dlg), daemon=True).start()
+    _ui_post(_dlg)
 
 
 def _fmt_key(k):
@@ -1626,11 +1712,17 @@ def _open_scan_window():
         import tkinter as tk
         from tkinter import ttk
 
-        root = tk.Tk()
+        root = tk.Toplevel(_ui_root)   # 常驻根的 Toplevel(免每次新建 tk.Tk() 冷启动)
         root.title("扫描导入歌曲")
         root.geometry("720x560")
         root.attributes("-topmost", True)
         _scan_root = root
+
+        def _on_closed():
+            global _scan_root
+            _scan_root = None          # 关窗 → 去托盘勾选
+            refresh_tray()
+        _tk_win_close_guard(root, _on_closed)
         refresh_tray()                 # 反映"已打开"的托盘勾选
 
         # 双页签:K歌(带音准)=本地缓存扫描;QQ(无音准)=登录态在线搜索
@@ -1948,273 +2040,284 @@ def _open_scan_window():
         _poll()
         _on_mode()                        # 初始:电脑模式(禁用设备行)+ 相应提示,不自动扫描
 
-        # ================= QQ（无音准）页签 =================
-        import base64 as _b64
-        try:
-            import qqmusic_import
-        except Exception as _qe:            # 依赖没装好时降级:页签可见但提示
-            qqmusic_import = None
-            print("[QQ] qqmusic_import 导入失败:", _qe)
+        # ================= QQ（无音准）页签(**延迟构建**)=================
+        # 只在用户第一次切到 QQ 页签时才搭这套控件 + 起 _qpoll 轮询,并触发 `import qqmusic_import`
+        # (已在启动时后台预热 → 此处瞬时命中)。窗口打开只需先把 K歌 页签建好,即时可见、不再卡。
+        _qq_built = {"done": False}
 
-        qst = {"phase": "idle", "msg": None, "results": None, "error": None, "gen": 0,
+        def _build_qq_tab():
+            if _qq_built["done"]:
+                return
+            _qq_built["done"] = True
+            _build_qq_tab_impl()
+
+        def _build_qq_tab_impl():
+            import base64 as _b64
+            try:
+                import qqmusic_import
+            except Exception as _qe:        # 依赖没装好时降级:页签可见但提示
+                qqmusic_import = None
+                print("[QQ] qqmusic_import 导入失败:", _qe)
+
+            qst = {"phase": "idle", "msg": None, "results": None, "error": None, "gen": 0,
                "qr_png": None, "login_msg": None, "login_done": None, "import_done": None,
                "dl_pct": None}   # dl_pct:None=不确定(转圈);0-100=下载百分比(确定进度条)
-        qrows = []
+            qrows = []
 
-        qtop = tk.Frame(qqf); qtop.pack(fill="x", padx=10, pady=(10, 4))
-        qlogin_lbl = tk.Label(qtop, text="", fg="#666666"); qlogin_lbl.pack(side="left")
-        qtype = ttk.Combobox(qtop, values=["QQ", "微信", "QQ音乐App"], state="readonly", width=9)
-        qtype.set("QQ")
-        qlogin_btn = tk.Button(qtop, text="登录")
-        qlogout_btn = tk.Button(qtop, text="退出登录")
-        qsearch_var = tk.StringVar(master=root)
-        qsearch_entry = tk.Entry(qtop, textvariable=qsearch_var, width=20)
-        qsearch_btn = tk.Button(qtop, text="搜索")
+            qtop = tk.Frame(qqf); qtop.pack(fill="x", padx=10, pady=(10, 4))
+            qlogin_lbl = tk.Label(qtop, text="", fg="#666666"); qlogin_lbl.pack(side="left")
+            qtype = ttk.Combobox(qtop, values=["QQ", "微信", "QQ音乐App"], state="readonly", width=9)
+            qtype.set("QQ")
+            qlogin_btn = tk.Button(qtop, text="登录")
+            qlogout_btn = tk.Button(qtop, text="退出登录")
+            qsearch_var = tk.StringVar(master=root)
+            qsearch_entry = tk.Entry(qtop, textvariable=qsearch_var, width=20)
+            qsearch_btn = tk.Button(qtop, text="搜索")
 
-        qqr_lbl = tk.Label(qqf); qqr_ref = {"img": None}    # 登录时显示二维码
-        qstatus = tk.Label(qqf, text="", anchor="w", fg="#666666"); qstatus.pack(fill="x", padx=12)
-        qprog = ttk.Progressbar(qqf, mode="indeterminate")
+            qqr_lbl = tk.Label(qqf); qqr_ref = {"img": None}    # 登录时显示二维码
+            qstatus = tk.Label(qqf, text="", anchor="w", fg="#666666"); qstatus.pack(fill="x", padx=12)
+            qprog = ttk.Progressbar(qqf, mode="indeterminate")
 
-        qbody = tk.Frame(qqf); qbody.pack(fill="both", expand=True, padx=(10, 0), pady=4)
-        qcanvas = tk.Canvas(qbody, highlightthickness=0)
-        qvsb = ttk.Scrollbar(qbody, orient="vertical", command=qcanvas.yview)
-        qvsb.pack(side="right", fill="y"); qcanvas.pack(side="left", fill="both", expand=True)
-        qcanvas.configure(yscrollcommand=qvsb.set)
-        qinner = tk.Frame(qcanvas, bg="#ffffff")
-        qwin = qcanvas.create_window((0, 0), window=qinner, anchor="nw")
-        qinner.bind("<Configure>", lambda e: qcanvas.configure(scrollregion=qcanvas.bbox("all")))
-        qcanvas.bind("<Configure>", lambda e: qcanvas.itemconfig(qwin, width=e.width))
+            qbody = tk.Frame(qqf); qbody.pack(fill="both", expand=True, padx=(10, 0), pady=4)
+            qcanvas = tk.Canvas(qbody, highlightthickness=0)
+            qvsb = ttk.Scrollbar(qbody, orient="vertical", command=qcanvas.yview)
+            qvsb.pack(side="right", fill="y"); qcanvas.pack(side="left", fill="both", expand=True)
+            qcanvas.configure(yscrollcommand=qvsb.set)
+            qinner = tk.Frame(qcanvas, bg="#ffffff")
+            qwin = qcanvas.create_window((0, 0), window=qinner, anchor="nw")
+            qinner.bind("<Configure>", lambda e: qcanvas.configure(scrollregion=qcanvas.bbox("all")))
+            qcanvas.bind("<Configure>", lambda e: qcanvas.itemconfig(qwin, width=e.width))
 
-        def _qwheel(e):
-            if qinner.winfo_height() <= qcanvas.winfo_height():
-                qcanvas.yview_moveto(0); return
-            qcanvas.yview_scroll(int(-e.delta / 120), "units")
-        qcanvas.bind("<Enter>", lambda e: qcanvas.bind_all("<MouseWheel>", _qwheel))
-        qcanvas.bind("<Leave>", lambda e: qcanvas.unbind_all("<MouseWheel>"))
+            def _qwheel(e):
+                if qinner.winfo_height() <= qcanvas.winfo_height():
+                    qcanvas.yview_moveto(0); return
+                qcanvas.yview_scroll(int(-e.delta / 120), "units")
+            qcanvas.bind("<Enter>", lambda e: qcanvas.bind_all("<MouseWheel>", _qwheel))
+            qcanvas.bind("<Leave>", lambda e: qcanvas.unbind_all("<MouseWheel>"))
 
-        qbar = tk.Frame(qqf); qbar.pack(fill="x", padx=10, pady=(2, 10))
-        tk.Button(qbar, text="全选", width=6,
-                  command=lambda: [r["chk"].set(True) for r in qrows if not r.get("in_library")]).pack(side="left")
-        tk.Button(qbar, text="全不选", width=7,
-                  command=lambda: [r["chk"].set(False) for r in qrows if not r.get("in_library")]).pack(side="left", padx=4)
-        qconfirm_btn = tk.Button(qbar, text="确认入库"); qconfirm_btn.pack(side="right")
-        tk.Button(qbar, text="关闭", width=7, command=root.destroy).pack(side="right", padx=6)
+            qbar = tk.Frame(qqf); qbar.pack(fill="x", padx=10, pady=(2, 10))
+            tk.Button(qbar, text="全选", width=6,
+                      command=lambda: [r["chk"].set(True) for r in qrows if not r.get("in_library")]).pack(side="left")
+            tk.Button(qbar, text="全不选", width=7,
+                      command=lambda: [r["chk"].set(False) for r in qrows if not r.get("in_library")]).pack(side="left", padx=4)
+            qconfirm_btn = tk.Button(qbar, text="确认入库"); qconfirm_btn.pack(side="right")
+            tk.Button(qbar, text="关闭", width=7, command=root.destroy).pack(side="right", padx=6)
 
-        def _qclear():
-            for w in qinner.winfo_children():
-                w.destroy()
-            qrows.clear()
+            def _qclear():
+                for w in qinner.winfo_children():
+                    w.destroy()
+                qrows.clear()
 
-        def _qadd_row(cand, idx):
-            base = C_EVEN if idx % 2 == 0 else C_ODD
-            in_lib = cand.get("in_library")
-            rf = tk.Frame(qinner, bg=base); rf.pack(fill="x")
-            rf.columnconfigure(1, weight=1, minsize=150)
-            chk = tk.BooleanVar(master=root, value=False)   # 默认全不选;master=root 防多窗口串解释器
-            cb = tk.Checkbutton(rf, variable=chk, bg=base, activebackground=base)
-            if in_lib:
-                cb.config(state="disabled")          # 已入库:禁止勾选
-            cb.grid(row=0, column=0, padx=(6, 2))
-            e_t = tk.Entry(rf, width=20); e_t.insert(0, cand.get("title") or "")
-            e_t.grid(row=0, column=1, sticky="we", padx=2, pady=4)
-            e_a = tk.Entry(rf, width=10); e_a.insert(0, cand.get("artist") or "")
-            e_a.grid(row=0, column=2, padx=2)
-            iv = cand.get("interval", 0) or 0
-            tk.Label(rf, text="%d:%02d" % (iv // 60, iv % 60), bg=base, fg="#999999", width=5).grid(row=0, column=3, padx=2)
-            if in_lib:                               # 已入库:置灰、禁编辑、标"已入库"、无试听
-                e_t.config(state="disabled", disabledforeground="#9aa0a6")
-                e_a.config(state="disabled", disabledforeground="#9aa0a6")
-                tk.Label(rf, text="已入库", bg=base, fg="#9aa0a6", width=6).grid(row=0, column=4, padx=(2, 6))
-            else:
-                tk.Label(rf, text="QQ", bg=base, fg="#888888", width=3).grid(row=0, column=4, padx=(2, 4))
-                tk.Button(rf, text="▶ 试听", command=lambda c=cand: _qpreview(c)).grid(row=0, column=5, padx=(2, 6))
-            qrows.append({"cand": cand, "chk": chk, "e_title": e_t, "e_artist": e_a, "in_library": in_lib})
-
-        def _qrender_new():
-            results = qst["results"] or []
-            for i in range(len(qrows), len(results)):
-                _qadd_row(results[i], i)
-
-        def _refresh_login_ui():
-            if qqmusic_import is None:
-                qlogin_lbl.config(text="✗ QQ模块未就绪(装 qqmusic-api-python)", fg="#c0392b")
-                qlogin_btn.config(state="disabled"); qsearch_btn.config(state="disabled")
-                qlogout_btn.config(state="disabled"); return
-            if qqmusic_import.logged_in():
-                qlogin_lbl.config(text="✓ 已登录", fg="#27ae60"); qlogin_btn.config(text="重新登录")
-                qlogout_btn.config(state="normal")
-            else:
-                qlogin_lbl.config(text="○ 未登录", fg="#c0392b"); qlogin_btn.config(text="登录")
-                qlogout_btn.config(state="disabled")
-
-        def _do_login():
-            lt = {"QQ": "QQ", "微信": "WX", "QQ音乐App": "MOBILE"}.get(qtype.get(), "QQ")
-            try:
-                ok = qqmusic_import.login_qr(
-                    lt, on_qr=lambda p: qst.update(qr_png=p),
-                    progress=lambda s: qst.update(login_msg=s), timeout=180)
-                qst["login_done"] = bool(ok)
-            except Exception as e:
-                qst["login_msg"] = "登录出错:%s" % e; qst["login_done"] = False
-
-        def _start_login():
-            if qqmusic_import is None:
-                return
-            qst.update(qr_png=None, login_msg="生成二维码…", login_done=None)
-            qprog.pack(fill="x", padx=12, pady=4, before=qbody); qprog.start(12)
-            qlogin_btn.config(state="disabled")
-            threading.Thread(target=_do_login, daemon=True).start()
-
-        def _do_search(gen, kw):
-            try:
-                res = qqmusic_import.search(kw, num=20)
-                if qst["gen"] == gen:
-                    qst["results"] = res; qst["phase"] = "done"
-            except Exception as e:
-                if qst["gen"] == gen:
-                    qst["error"] = str(e); qst["phase"] = "done"
-
-        def _start_search():
-            if qqmusic_import is None:
-                return
-            if not qqmusic_import.logged_in():
-                qstatus.config(text="请先登录 QQ音乐（点上方“登录”扫码）", fg="#c0392b"); return
-            kw = qsearch_var.get().strip()
-            if not kw:
-                return
-            qst["gen"] += 1; qst.update(phase="searching", results=[], error=None)
-            _qclear(); qcanvas.yview_moveto(0)
-            qprog.pack(fill="x", padx=12, pady=4, before=qbody); qprog.start(12)
-            qconfirm_btn.config(state="disabled"); qsearch_btn.config(state="disabled")
-            threading.Thread(target=_do_search, args=(qst["gen"], kw), daemon=True).start()
-
-        def _qconfirm():
-            picked = [r for r in qrows if r["chk"].get() and not r.get("in_library")]
-            if not picked:
-                return
-            qconfirm_btn.config(state="disabled"); qsearch_btn.config(state="disabled")
-            qst["import_done"] = None
-            qprog.pack(fill="x", padx=12, pady=4, before=qbody); qprog.start(12)
-
-            def _work():
-                n = 0
-                for i, r in enumerate(picked):
-                    c = r["cand"]
-                    head = "入库 %d/%d " % (i + 1, len(picked))
-                    try:
-                        qst.update(msg=head + r["e_title"].get(), dl_pct=None)
-                        qqmusic_import.prepare(
-                            c,
-                            progress_cb=lambda m, h=head: qst.update(msg=h + m, dl_pct=None),
-                            pct_cb=lambda label, pct, h=head: qst.update(msg="%s%s %d%%" % (h, label, pct), dl_pct=pct))
-                        library.import_candidate(c, r["e_title"].get().strip(), r["e_artist"].get().strip())
-                        n += 1
-                    except Exception as e:
-                        print("[QQ] 入库失败 %s: %s" % (c.get("mid"), e))
-                try:
-                    _on_lib_change()
-                except Exception:
-                    pass
-                qst["import_done"] = n
-            threading.Thread(target=_work, daemon=True).start()
-
-        def _qpreview(cand):
-            """QQ 试听:worker 里**只下伴奏一轨**(preview=True)到暂存 → 复用 _preview 子进程播放
-            (系统默认输出=自己听,不进直播)。之后勾选入库会再下全量覆盖。"""
-            if qqmusic_import is None:
-                return
-
-            def _work():
-                try:
-                    qst.update(msg="试听:%s" % (cand.get("title") or ""), dl_pct=None)
-                    qqmusic_import.prepare(
-                        cand, preview=True,
-                        progress_cb=lambda m: qst.update(msg="试听 " + m, dl_pct=None),
-                        pct_cb=lambda label, pct: qst.update(msg="试听 %s %d%%" % (label, pct), dl_pct=pct))
-                    qst.update(msg="试听中(伴奏,系统默认输出、不进直播)。", dl_pct=None)
-                    _preview(cand)                    # src_root=QQ_STAGING_DIR,已备好伴奏
-                except Exception as e:
-                    qst.update(msg="试听失败:%s" % e, dl_pct=None)
-            threading.Thread(target=_work, daemon=True).start()
-
-        def _qpoll():
-            # 进度条:显示时按 dl_pct 切「转圈(不确定)」/「百分比(确定)」
-            if qprog.winfo_ismapped():
-                pct = qst.get("dl_pct")
-                if pct is None:
-                    if str(qprog["mode"]) != "indeterminate":
-                        qprog.config(mode="indeterminate"); qprog.start(12)
+            def _qadd_row(cand, idx):
+                base = C_EVEN if idx % 2 == 0 else C_ODD
+                in_lib = cand.get("in_library")
+                rf = tk.Frame(qinner, bg=base); rf.pack(fill="x")
+                rf.columnconfigure(1, weight=1, minsize=150)
+                chk = tk.BooleanVar(master=root, value=False)   # 默认全不选;master=root 防多窗口串解释器
+                cb = tk.Checkbutton(rf, variable=chk, bg=base, activebackground=base)
+                if in_lib:
+                    cb.config(state="disabled")          # 已入库:禁止勾选
+                cb.grid(row=0, column=0, padx=(6, 2))
+                e_t = tk.Entry(rf, width=20); e_t.insert(0, cand.get("title") or "")
+                e_t.grid(row=0, column=1, sticky="we", padx=2, pady=4)
+                e_a = tk.Entry(rf, width=10); e_a.insert(0, cand.get("artist") or "")
+                e_a.grid(row=0, column=2, padx=2)
+                iv = cand.get("interval", 0) or 0
+                tk.Label(rf, text="%d:%02d" % (iv // 60, iv % 60), bg=base, fg="#999999", width=5).grid(row=0, column=3, padx=2)
+                if in_lib:                               # 已入库:置灰、禁编辑、标"已入库"、无试听
+                    e_t.config(state="disabled", disabledforeground="#9aa0a6")
+                    e_a.config(state="disabled", disabledforeground="#9aa0a6")
+                    tk.Label(rf, text="已入库", bg=base, fg="#9aa0a6", width=6).grid(row=0, column=4, padx=(2, 6))
                 else:
-                    if str(qprog["mode"]) != "determinate":
-                        qprog.stop(); qprog.config(mode="determinate", maximum=100)
-                    qprog["value"] = pct
-            if qst.get("qr_png") is not None:
-                png = qst["qr_png"]; qst["qr_png"] = None
+                    tk.Label(rf, text="QQ", bg=base, fg="#888888", width=3).grid(row=0, column=4, padx=(2, 4))
+                    tk.Button(rf, text="▶ 试听", command=lambda c=cand: _qpreview(c)).grid(row=0, column=5, padx=(2, 6))
+                qrows.append({"cand": cand, "chk": chk, "e_title": e_t, "e_artist": e_a, "in_library": in_lib})
+
+            def _qrender_new():
+                results = qst["results"] or []
+                for i in range(len(qrows), len(results)):
+                    _qadd_row(results[i], i)
+
+            def _refresh_login_ui():
+                if qqmusic_import is None:
+                    qlogin_lbl.config(text="✗ QQ模块未就绪(装 qqmusic-api-python)", fg="#c0392b")
+                    qlogin_btn.config(state="disabled"); qsearch_btn.config(state="disabled")
+                    qlogout_btn.config(state="disabled"); return
+                if qqmusic_import.logged_in():
+                    qlogin_lbl.config(text="✓ 已登录", fg="#27ae60"); qlogin_btn.config(text="重新登录")
+                    qlogout_btn.config(state="normal")
+                else:
+                    qlogin_lbl.config(text="○ 未登录", fg="#c0392b"); qlogin_btn.config(text="登录")
+                    qlogout_btn.config(state="disabled")
+
+            def _do_login():
+                lt = {"QQ": "QQ", "微信": "WX", "QQ音乐App": "MOBILE"}.get(qtype.get(), "QQ")
                 try:
-                    img = tk.PhotoImage(master=root, data=_b64.b64encode(png).decode("ascii"))
-                    qqr_ref["img"] = img; qqr_lbl.config(image=img)
-                    if not qqr_lbl.winfo_ismapped():
-                        qqr_lbl.pack(pady=4, before=qstatus)
-                except Exception:            # Tk 不认该 PNG 时退回:存临时文件用系统看图器打开
+                    ok = qqmusic_import.login_qr(
+                        lt, on_qr=lambda p: qst.update(qr_png=p),
+                        progress=lambda s: qst.update(login_msg=s), timeout=180)
+                    qst["login_done"] = bool(ok)
+                except Exception as e:
+                    qst["login_msg"] = "登录出错:%s" % e; qst["login_done"] = False
+
+            def _start_login():
+                if qqmusic_import is None:
+                    return
+                qst.update(qr_png=None, login_msg="生成二维码…", login_done=None)
+                qprog.pack(fill="x", padx=12, pady=4, before=qbody); qprog.start(12)
+                qlogin_btn.config(state="disabled")
+                threading.Thread(target=_do_login, daemon=True).start()
+
+            def _do_search(gen, kw):
+                try:
+                    res = qqmusic_import.search(kw, num=20)
+                    if qst["gen"] == gen:
+                        qst["results"] = res; qst["phase"] = "done"
+                except Exception as e:
+                    if qst["gen"] == gen:
+                        qst["error"] = str(e); qst["phase"] = "done"
+
+            def _start_search():
+                if qqmusic_import is None:
+                    return
+                if not qqmusic_import.logged_in():
+                    qstatus.config(text="请先登录 QQ音乐（点上方“登录”扫码）", fg="#c0392b"); return
+                kw = qsearch_var.get().strip()
+                if not kw:
+                    return
+                qst["gen"] += 1; qst.update(phase="searching", results=[], error=None)
+                _qclear(); qcanvas.yview_moveto(0)
+                qprog.pack(fill="x", padx=12, pady=4, before=qbody); qprog.start(12)
+                qconfirm_btn.config(state="disabled"); qsearch_btn.config(state="disabled")
+                threading.Thread(target=_do_search, args=(qst["gen"], kw), daemon=True).start()
+
+            def _qconfirm():
+                picked = [r for r in qrows if r["chk"].get() and not r.get("in_library")]
+                if not picked:
+                    return
+                qconfirm_btn.config(state="disabled"); qsearch_btn.config(state="disabled")
+                qst["import_done"] = None
+                qprog.pack(fill="x", padx=12, pady=4, before=qbody); qprog.start(12)
+
+                def _work():
+                    n = 0
+                    for i, r in enumerate(picked):
+                        c = r["cand"]
+                        head = "入库 %d/%d " % (i + 1, len(picked))
+                        try:
+                            qst.update(msg=head + r["e_title"].get(), dl_pct=None)
+                            qqmusic_import.prepare(
+                                c,
+                                progress_cb=lambda m, h=head: qst.update(msg=h + m, dl_pct=None),
+                                pct_cb=lambda label, pct, h=head: qst.update(msg="%s%s %d%%" % (h, label, pct), dl_pct=pct))
+                            library.import_candidate(c, r["e_title"].get().strip(), r["e_artist"].get().strip())
+                            n += 1
+                        except Exception as e:
+                            print("[QQ] 入库失败 %s: %s" % (c.get("mid"), e))
                     try:
-                        import tempfile
-                        fp = os.path.join(tempfile.gettempdir(), "qq_login_qr.png")
-                        open(fp, "wb").write(png); os.startfile(fp)
+                        _on_lib_change()
                     except Exception:
                         pass
-            if qst.get("login_msg"):
-                qstatus.config(text="登录:%s" % qst["login_msg"], fg="#666666"); qst["login_msg"] = None
-            if qst.get("login_done") is not None:
-                done = qst["login_done"]; qst["login_done"] = None
-                qprog.stop(); qprog.pack_forget(); qprog.config(mode="indeterminate"); qst["dl_pct"] = None
-                qqr_lbl.pack_forget(); qqr_ref["img"] = None
-                qlogin_btn.config(state="normal"); _refresh_login_ui()
-                qstatus.config(text="登录成功,可以搜索了。" if done else "登录未完成(超时/取消/拒绝),可重试。",
-                               fg="#27ae60" if done else "#c0392b")
-            _qrender_new()
-            if qst["phase"] == "searching":
-                qstatus.config(text="搜索中…", fg="#666666")
-            elif qst["phase"] == "done":
-                qprog.stop(); qprog.pack_forget(); qprog.config(mode="indeterminate"); qst["dl_pct"] = None
-                qconfirm_btn.config(state="normal"); qsearch_btn.config(state="normal")
-                n = len(qst["results"] or [])
-                if qst.get("error"):
-                    qstatus.config(text="搜索失败:%s" % qst["error"], fg="#c0392b")
-                elif n:
-                    new_n = sum(1 for c in (qst["results"] or []) if not c.get("in_library"))
-                    qstatus.config(text="搜到 %d 首(灰色=已入库,%d 首可导入);勾选新歌,确认入库(下载解码较慢)。" % (n, new_n),
-                                   fg="#666666")
-                else:
-                    qstatus.config(text="没有结果。", fg="#666666")
-                qst["phase"] = "idle"; qst["error"] = None
-            if qst.get("msg"):
-                qstatus.config(text=qst["msg"], fg="#666666"); qst["msg"] = None
-            if qst.get("import_done") is not None:
-                nn = qst["import_done"]; qst["import_done"] = None
-                qprog.stop(); qprog.pack_forget(); qprog.config(mode="indeterminate"); qst["dl_pct"] = None
-                qconfirm_btn.config(state="normal"); qsearch_btn.config(state="normal")
-                qstatus.config(text="已入库 %d 首(切到 K歌曲库管理可见)。" % nn, fg="#27ae60")
-            root.after(150, _qpoll)
+                    qst["import_done"] = n
+                threading.Thread(target=_work, daemon=True).start()
 
-        qlogin_btn.config(command=_start_login)
-        qlogout_btn.config(command=lambda: (qqmusic_import and qqmusic_import.logout(), _refresh_login_ui()))
-        qsearch_btn.config(command=_start_search)
-        qconfirm_btn.config(command=_qconfirm)      # ← 之前漏接:确认入库按钮
-        qsearch_entry.bind("<Return>", lambda e: _start_search())
-        qtype.pack(side="left", padx=4); qlogin_btn.pack(side="left")
-        qlogout_btn.pack(side="left", padx=4)
-        qsearch_btn.pack(side="right"); qsearch_entry.pack(side="right", padx=6)
-        tk.Label(qtop, text="搜索:", fg="#666666").pack(side="right")
-        _refresh_login_ui(); _qpoll()
+            def _qpreview(cand):
+                """QQ 试听:worker 里**只下伴奏一轨**(preview=True)到暂存 → 复用 _preview 子进程播放
+                (系统默认输出=自己听,不进直播)。之后勾选入库会再下全量覆盖。"""
+                if qqmusic_import is None:
+                    return
 
-        try:
-            root.after(120, root.focus_force)
-            root.mainloop()
-        finally:
-            _scan_root = None          # 关窗 → 去托盘勾选
-            refresh_tray()
+                def _work():
+                    try:
+                        qst.update(msg="试听:%s" % (cand.get("title") or ""), dl_pct=None)
+                        qqmusic_import.prepare(
+                            cand, preview=True,
+                            progress_cb=lambda m: qst.update(msg="试听 " + m, dl_pct=None),
+                            pct_cb=lambda label, pct: qst.update(msg="试听 %s %d%%" % (label, pct), dl_pct=pct))
+                        qst.update(msg="试听中(伴奏,系统默认输出、不进直播)。", dl_pct=None)
+                        _preview(cand)                    # src_root=QQ_STAGING_DIR,已备好伴奏
+                    except Exception as e:
+                        qst.update(msg="试听失败:%s" % e, dl_pct=None)
+                threading.Thread(target=_work, daemon=True).start()
 
-    threading.Thread(target=_tk_window_thread(_win), daemon=True).start()
+            def _qpoll():
+                # 进度条:显示时按 dl_pct 切「转圈(不确定)」/「百分比(确定)」
+                if qprog.winfo_ismapped():
+                    pct = qst.get("dl_pct")
+                    if pct is None:
+                        if str(qprog["mode"]) != "indeterminate":
+                            qprog.config(mode="indeterminate"); qprog.start(12)
+                    else:
+                        if str(qprog["mode"]) != "determinate":
+                            qprog.stop(); qprog.config(mode="determinate", maximum=100)
+                        qprog["value"] = pct
+                if qst.get("qr_png") is not None:
+                    png = qst["qr_png"]; qst["qr_png"] = None
+                    try:
+                        img = tk.PhotoImage(master=root, data=_b64.b64encode(png).decode("ascii"))
+                        qqr_ref["img"] = img; qqr_lbl.config(image=img)
+                        if not qqr_lbl.winfo_ismapped():
+                            qqr_lbl.pack(pady=4, before=qstatus)
+                    except Exception:            # Tk 不认该 PNG 时退回:存临时文件用系统看图器打开
+                        try:
+                            import tempfile
+                            fp = os.path.join(tempfile.gettempdir(), "qq_login_qr.png")
+                            open(fp, "wb").write(png); os.startfile(fp)
+                        except Exception:
+                            pass
+                if qst.get("login_msg"):
+                    qstatus.config(text="登录:%s" % qst["login_msg"], fg="#666666"); qst["login_msg"] = None
+                if qst.get("login_done") is not None:
+                    done = qst["login_done"]; qst["login_done"] = None
+                    qprog.stop(); qprog.pack_forget(); qprog.config(mode="indeterminate"); qst["dl_pct"] = None
+                    qqr_lbl.pack_forget(); qqr_ref["img"] = None
+                    qlogin_btn.config(state="normal"); _refresh_login_ui()
+                    qstatus.config(text="登录成功,可以搜索了。" if done else "登录未完成(超时/取消/拒绝),可重试。",
+                                   fg="#27ae60" if done else "#c0392b")
+                _qrender_new()
+                if qst["phase"] == "searching":
+                    qstatus.config(text="搜索中…", fg="#666666")
+                elif qst["phase"] == "done":
+                    qprog.stop(); qprog.pack_forget(); qprog.config(mode="indeterminate"); qst["dl_pct"] = None
+                    qconfirm_btn.config(state="normal"); qsearch_btn.config(state="normal")
+                    n = len(qst["results"] or [])
+                    if qst.get("error"):
+                        qstatus.config(text="搜索失败:%s" % qst["error"], fg="#c0392b")
+                    elif n:
+                        new_n = sum(1 for c in (qst["results"] or []) if not c.get("in_library"))
+                        qstatus.config(text="搜到 %d 首(灰色=已入库,%d 首可导入);勾选新歌,确认入库(下载解码较慢)。" % (n, new_n),
+                                       fg="#666666")
+                    else:
+                        qstatus.config(text="没有结果。", fg="#666666")
+                    qst["phase"] = "idle"; qst["error"] = None
+                if qst.get("msg"):
+                    qstatus.config(text=qst["msg"], fg="#666666"); qst["msg"] = None
+                if qst.get("import_done") is not None:
+                    nn = qst["import_done"]; qst["import_done"] = None
+                    qprog.stop(); qprog.pack_forget(); qprog.config(mode="indeterminate"); qst["dl_pct"] = None
+                    qconfirm_btn.config(state="normal"); qsearch_btn.config(state="normal")
+                    qstatus.config(text="已入库 %d 首(切到 K歌曲库管理可见)。" % nn, fg="#27ae60")
+                root.after(150, _qpoll)
+
+            qlogin_btn.config(command=_start_login)
+            qlogout_btn.config(command=lambda: (qqmusic_import and qqmusic_import.logout(), _refresh_login_ui()))
+            qsearch_btn.config(command=_start_search)
+            qconfirm_btn.config(command=_qconfirm)      # ← 之前漏接:确认入库按钮
+            qsearch_entry.bind("<Return>", lambda e: _start_search())
+            qtype.pack(side="left", padx=4); qlogin_btn.pack(side="left")
+            qlogout_btn.pack(side="left", padx=4)
+            qsearch_btn.pack(side="right"); qsearch_entry.pack(side="right", padx=6)
+            tk.Label(qtop, text="搜索:", fg="#666666").pack(side="right")
+            _refresh_login_ui(); _qpoll()
+
+        # 切到 QQ 页签(index 1)时才构建它;之后重复切换不再重建
+        nb.bind("<<NotebookTabChanged>>",
+                lambda e: (nb.index(nb.select()) == 1) and _build_qq_tab())
+
+        root.after(120, root.focus_force)
+        # 关窗善后(清 _scan_root + 刷托盘)已由 _tk_win_close_guard 接管;无独立 mainloop(用常驻根)
+
+    _ui_post(_win)
 
 
 def _open_library_browser(selftest=False):
@@ -2233,11 +2336,18 @@ def _open_library_browser(selftest=False):
         try:
             import tkinter as tk
             from tkinter import ttk
-            root = tk.Tk()
+            # 正常路径:常驻根的 Toplevel(免 tk.Tk() 冷启动)+ close_guard 善后。
+            # selftest:仍用独立 tk.Tk()+自带 mainloop(headless 自检,不依赖常驻 UI 线程)。
+            root = tk.Tk() if selftest else tk.Toplevel(_ui_root)
             root.title("K歌曲库管理")
             root.geometry("720x500")
             _lib_root = root
             if not selftest:
+                def _on_closed():
+                    global _lib_root
+                    _lib_root = None
+                    refresh_tray()
+                _tk_win_close_guard(root, _on_closed)
                 refresh_tray()         # 反映"已打开"的托盘勾选(selftest 不碰托盘)
             root.attributes("-topmost", True)
 
@@ -2279,13 +2389,16 @@ def _open_library_browser(selftest=False):
                        lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
             canvas.bind("<Configure>",
                         lambda e: canvas.itemconfig(win_id, width=e.width))
-            def _on_wheel(e):                       # 滚轮(本解释器独享,窗口关即失效)
+            def _on_wheel(e):                       # 滚轮
                 # 内容比视口短就锁顶不滚,防上滚把短内容推下、顶部露白;超出才滚。
                 if inner.winfo_height() <= canvas.winfo_height():
                     canvas.yview_moveto(0)
                     return
                 canvas.yview_scroll(int(-e.delta / 120), "units")
-            canvas.bind_all("<MouseWheel>", _on_wheel)
+            # 常驻单根下全进程共用一个解释器,`bind_all` 是应用级的——多窗同开会互相顶掉滚轮绑定。
+            # 故与扫描窗一致:鼠标进本 canvas 才 bind_all、离开即 unbind_all,滚轮归属当前悬停窗口。
+            canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_wheel))
+            canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
             # 行配色:斑马纹交替底色 + 悬停高亮 + 点击选中态(纯 tk 无 Treeview 选中样式,手动画)
             C_EVEN, C_ODD, C_HOVER, C_SEL = "#ffffff", "#f4f5f7", "#eaf1fb", "#c8e0f8"
@@ -2486,7 +2599,8 @@ def _open_library_browser(selftest=False):
             bar.pack(fill="x", padx=10, pady=(0, 10))
             tk.Button(bar, text="关闭", width=8, command=root.destroy).pack(side="right")
 
-            refresh()
+            # 先让窗壳 + 工具栏立即出图,首批 60 行放到 idle 再渲(避免开窗前同步建 360+ 控件卡首帧)
+            root.after_idle(refresh)
             root.after(120, root.focus_force)
             if selftest:   # headless 自检:反复滚到底驱动分页,打印进度,渲完自毁
                 def _auto(i=0):
@@ -2501,15 +2615,20 @@ def _open_library_browser(selftest=False):
                     except Exception:
                         pass
                 root.after(600, _auto)
-            root.mainloop()
+                root.mainloop()    # selftest 独立根:自带 mainloop 驱动;正常路径用常驻根,不 mainloop
         except Exception as ex:
             print(f"[LIB] 曲库管理窗失败: {ex}")
-        finally:
-            _lib_root = None           # 关窗 → 去托盘勾选
             if not selftest:
-                refresh_tray()
+                try:
+                    root.destroy()     # 触发 close_guard 善后(gc 恢复 + 清 _lib_root + 刷托盘)
+                except Exception:
+                    _lib_root = None
+                    refresh_tray()
 
-    threading.Thread(target=_tk_window_thread(_win), daemon=True).start()
+    if selftest:
+        threading.Thread(target=_tk_window_thread(_win), daemon=True).start()
+    else:
+        _ui_post(_win)
 
 
 # ── K歌:发指令给播放器 + 点歌队列 ──────────────────────
@@ -2777,6 +2896,8 @@ def main():
     library.start(STATE, _on_lib_change, _on_lib_import)  # 曲库监听(WeSing缓存→永久曲库,入库弹通知)
     start_player()        # 拉起 K歌播放器子进程(隐藏+暂停)
     _start_bgm_vol_poller()   # 周期回读 QQ音乐 音量 → 反向同步到手机(PC 上手动改音量也能同步)
+    _start_ui_thread()    # 常驻隐藏 Tk 根 + 单 mainloop:曲库/扫描/改名等窗口都做它的 Toplevel(开窗更快)
+    threading.Thread(target=_prewarm_qqmusic, daemon=True).start()  # 预热 QQ 导入(消除首开扫描窗几秒卡顿)
     try:
         _pycaw_exec.submit(_resolve_qq_sessions)   # 后台预热会话缓存:让首次播放/暂停渐变不必现场枚举
     except Exception:
