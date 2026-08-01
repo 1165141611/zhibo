@@ -8,7 +8,7 @@
 │  直播遥控系统                                                  │
 │  [安卓悬浮窗 App: LiveRemote] --WiFi/WebSocket--> [PC服务: live-remote] │
 │                                                  ├─ MIDI → Studio One 声卡场景 │
-│                                                  └─ 媒体键/pycaw → QQ音乐 BGM   │
+│                                                  └─ SMTC(winrt)/pycaw → QQ音乐 BGM │
 ├─────────────────────────────────────────────────────────────┤
 │  自制K歌播放器                                                 │
 │  [karaoke-player] 从PC版WeSing扒歌词/音高/伴奏 → 自渲染 → 直播伴侣 │

@@ -45,7 +45,7 @@
 | 解密 | 伴奏/原唱 PCM=静态256字节XOR;歌词QRC=三重魔改DES | 已破解,见 karaoke-player |
 | 歌名来源 | QRC 的 `[ti:]`/`[ar:]`,入库时清洗(去 `-歌手-ktv` 后缀);脏到救不回的(纯数字ID/空)标 `needs_name` **手动改名**。**播放器显示(状态栏 + 前奏歌名)一律采用入库保存值 `meta.json`(清洗 + 手动改名后),不用 QRC 原文** | WeSing 对 KTV/上传版常填脏(成都存成 `2422569`)。干净名只在 `KSongsDataInfo.dat`,但那是 **AES 强加密(熵7.9/非ECB/DLL无TEA或明文key)=弯路,别再啃**(2026-07-14 已验证放弃)。播放器采用保存值:2026-07-15,`assets.Song` 读 `<mid>/meta.json` 覆盖 title/artist |
 | 升降调 | 连续流式 **WSOLA**(audiotsm),在音频引擎里实时秒切 | 时域算法,无金属声;分块/相位声码器都是坑 |
-| 音频输出 | 声卡 ROUTIST `PLAYBACK 1/2`(WASAPI 设备 27) | =BGM那条路由;别走 3/4(麦克风监听会回授) |
+| 音频输出 | 声卡 ROUTIST `PLAYBACK 1/2`(WASAPI 按**名**解析,索引不稳、27 仅回退) | =BGM那条路由;别走 3/4(麦克风监听会回授)。pc-service 托管播放器时用 `_resolve_player_device()` 按名匹配 `PLAYBACK 1/2`,`config.PLAYER_DEVICE=27` 仅回退(接相机/ToDesk 会挤动索引) |
 | 点歌 | **队列(KTV式)**:连点排队、可重排/删;**唱完不自动连播**——切到下一首开头暂停,BGM 顶上,主播手动开唱。**空队列点第一首也不自动开唱**——同样装在开头暂停,等主播手动播。**曲库列表默认按点歌次数倒序**(每次点歌 `library.plays` +1 存 `library.json`,常点的浮最前) | 2026-07-13 由"自动连播"改为"切下首暂停";2026-07-15 空队列首歌也由"入队即开唱"改为"载入暂停";2026-07-16 加点歌次数记录 + 列表按次数倒序 |
 | 每曲默认调式 | 曲库管理页每行 **`−  <调>  +`** 设该曲默认调(存 `library.key`,[-6,6],0=原调);载歌时 `_player_load` 自动下发,**手机点到这首就是调好的调,不必每次手动升降**。手机端 `key` 跟随服务端推的 `k_key`,自动显示、无需改 App | 2026-07-16 新增 |
 | 未演唱态渲染 | 歌曲已载入但**从未开唱**(进度 0)时,绿幕播放器**只出纯绿背景,不画歌词/音准线/前奏歌名**;主播一按播放即恢复正常渲染(暂停在半途仍算演唱中,照常显示) | 2026-07-15 加;避免观众提前看到还没开唱那首(队列首歌/切到的下一首)的词和音高。播放器 `_ever_played` 标志:载歌置否、开唱置真 |
@@ -175,8 +175,10 @@ brief([`LiveRemote/UI_DESIGN.md`](LiveRemote/UI_DESIGN.md),已作历史 brief �
     手机歌转成与 PC 一致的四件套,播放器/点歌/升降调全链路零改动。补 PC 下不到的用户自传歌。
   - **QQ音乐 源接入(2026-07-26)**:补"特殊版只在 QQ音乐 有"的歌。**第三个曲库来源**,与全民K歌 PC/手机并列——
     走**登录态 API**(`qqmusic-api-python`),关键发现是**有会员权限时非加密音质直接返回明文文件、不需要 ekey/QMCv2 解密**:
-    `SpecialSongFileType.ACCOM`=明文 OggS 伴奏 stem(与原唱等长对齐)、`FLAC`=明文原唱、`lyric.get_lyric(qrc=True)`=
-    已解密逐字 QRC。产出四件套但**减 `.note`**(QQ音乐 无音高→无音准线,故页签名标「无音准」)。扫描窗改 `ttk.Notebook`
+    `SongFileType.FLAC`=明文原唱、`lyric.get_lyric(qrc=True)`=已解密逐字 QRC。**伴奏不取 QQ 的 `SpecialSongFileType.ACCOM`**
+    (2026-07-28 弃用:实测它对 **Live/特殊版常返回另一版原唱**、仍带人声非伴奏,不可靠;QQ音乐 本就不带真伴奏),
+    统一**保留高质量 FLAC 无损原唱 + Demucs 从原唱人声分离出伴奏**(未装 demucs 才降级两轨都用原唱占位)。
+    产出四件套但**减 `.note`**(QQ音乐 无音高→无音准线,故页签名标「无音准」)。扫描窗改 `ttk.Notebook`
     双页签「K歌(带音准)/QQ(无音准)」;QQ 页签=扫码登录+在线搜索+勾选,确认入库时才下载解码。编排 `pc-service/qqmusic_import.py`,
     详见 [live-remote/DEV_LOG.md](live-remote/DEV_LOG.md) 第十八节。
 - **待做**:第④步进一步端到端联调 + 直播绿幕接入细化;手机端持续打磨(新增的音准线开关等改动需重打 APK)。
@@ -185,6 +187,6 @@ brief([`LiveRemote/UI_DESIGN.md`](LiveRemote/UI_DESIGN.md),已作历史 brief �
 ## 八、关键事实速查
 
 - Python:`C:\Users\11651\AppData\Local\Programs\Python\Python313\python.exe`(PATH 里的是 Store 占位版,不能用)。
-- 运行播放器:`python player.py --device 27`(声卡 PLAYBACK 1/2)。
+- 运行播放器:`python player.py --device 27`(声卡 PLAYBACK 1/2;**独立跑**时给索引即可。pc-service 托管时改**按名解析** `PLAYBACK 1/2`,27 仅回退——索引会被相机/ToDesk 虚拟音频挤动)。
 - 依赖:`numpy scipy sounddevice PySide6 audiotsm pycryptodome`(+ SMTC 若用:`winrt-Windows.Media.Playback` 等)。
 - 密钥/解密:`karaoke-player/wesing_pcm_key.py`(PCM XOR)、`tripledes.py`+`qmc1.py`(QRC DES)。仅自用勿外传。

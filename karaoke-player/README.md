@@ -6,7 +6,7 @@
 
 ---
 
-## 现状(2026-07-14)
+## 现状(2026-07-28)
 
 **已整合进直播系统、多曲可用**:由 pc-service 托管为绿幕字幕源(见 [../live-remote/README.md](../live-remote/README.md)),
 手机 App / 曲库管理页远程控制。核心四件套 + 一批直播打磨功能都已落地:
@@ -56,7 +56,7 @@
    > 从歌曲开头静音段直接读出密钥。验证:解密后前 1 秒精确静音、整轨 RMS 0.2 = 真音乐。
    > (曾误判 AES 去读 WeSing 内存暴破,是弯路。)
 
-## 数据来源:手机版全民K歌(2026-07-25 接入,补 PC 下不到的歌)
+## 数据来源:手机版全民K歌(2026-07-26 接入,补 PC 下不到的歌)
 
 PC 版对用户自传/部分歌下不了伴奏;手机版能下。安卓(adb 可读 `Android/data`,模拟器免 root)
 资源在 `/sdcard/Android/data/com.tencent.karaoke/files/`:
@@ -81,8 +81,10 @@ PC 版对用户自传/部分歌下不了伴奏;手机版能下。安卓(adb 可�
 ## 数据来源:QQ音乐(2026-07-26 接入,补"特殊版只在 QQ音乐 有"的歌)
 
 走**登录态 API**(编排在 `pc-service/qqmusic_import.py`,详见 live-remote/DEV_LOG.md 第十八节)。关键:**有会员
-权限时非加密音质直接返回明文文件,不需要 ekey/QMCv2 解密**——`SpecialSongFileType.ACCOM`=明文 OggS **伴奏 stem**
-(与原唱等长对齐)、`SongFileType.FLAC`=明文原唱、`lyric.get_lyric(qrc=True)`=已解密**逐字 QRC XML**。产出与
+权限时非加密音质直接返回明文文件,不需要 ekey/QMCv2 解密**——`SongFileType.FLAC`=明文原唱、
+`lyric.get_lyric(qrc=True)`=已解密**逐字 QRC XML**。**伴奏不取 QQ 的 `SpecialSongFileType.ACCOM`**(2026-07-28 弃用:
+实测它对 **Live/特殊版常返回另一版原唱**、仍带人声非伴奏,不可靠;QQ音乐 本就不带真伴奏),统一**保留高质量 FLAC
+无损原唱 + Demucs 从原唱人声分离出伴奏**(未装 demucs 才降级两轨都用原唱占位)。产出与
 全民K歌四件套一致但 **减 `.note`**(QQ音乐 无音高数据→写空 `.note`,`load_notes` 返回空、播放器不显音准线)。
 - 播放器侧唯一改动:**`assets._qrc_decrypt` 新增明文 QRC 分支**——识别 `<?xml`/`<QrcInfos`/`LyricContent=`
   开头即当已解密明文直接返回(QQ音乐 歌词经 API 已解密成明文,直接落盘 `.qrc`)。手机/PC WeSing 的加密 QRC 走原路。
@@ -180,7 +182,7 @@ PC 版对用户自传/部分歌下不了伴奏;手机版能下。安卓(adb 可�
   销毁原生 HWND(见 ToDesk 拖影条目),再 show 时 Qt 会放到默认位置,不显式 move 就跳回去**。位置随
   `STATE` 的 `win_x/win_y` 上报,pc-service 存 `state_cache.json`,拉起播放器时用 `pos x y` 下发恢复
   (服务重启也记得)。
-- **音频输出走声卡 ROUTIST 的 `PLAYBACK 1/2`**(WASAPI 设备索引 27,=用户 BGM 那条路由)。
+- **音频输出走声卡 ROUTIST 的 `PLAYBACK 1/2`**(=用户 BGM 那条路由;独立跑时 `--device 27`,但**索引不稳**——接相机/ToDesk 虚拟音频会挤动枚举顺序,pc-service 托管时改**按名解析** `PLAYBACK 1/2`,27 仅回退)。
   **不能**走默认的 `PLAYBACK 3/4`(那是麦克风监听通道,会回授炸麦)。
 - **低内存**:机器 RAM 紧张(WeSing+StudioOne+QQ音乐全开时连 59MB 分配都失败),避免整首一次性
   分配大数组——流式处理正好也解决了这点。
