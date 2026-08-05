@@ -91,6 +91,16 @@ class KaraokeWindow(QtWidgets.QWidget):
         self.setlist_titles = []                    # 歌单歌名(pc-service 据曲库勾选推来)
         self.setlist_y = 24                         # 歌单竖直位置(Ctrl+↑↓ 移动;缓存)
         self._setlist_pix = None                    # 歌单滚动条 pixmap(内容/字体变时重建)
+        # 礼物菜单:绿幕左侧竖排"礼物→权益"引导条(如 🎈点歌 / 🍰插队)。内容由 pc-service
+        # 「礼物菜单配置」窗选礼物+填自定义文字后经 IPC `gifts` 推来;G 键/IPC 显隐;鼠标可单独拖动
+        # (命中检测:按在礼物条上拖它、否则拖整窗),位置/显隐经 STATE 上报 pc-service 缓存。
+        self.show_gifts = True                      # 礼物菜单显隐(G 键 / IPC gifts_show;缓存)
+        self.gift_items = []                        # 礼物条内容 [{icon,text}](顺序即显示顺序)
+        self.gift_x = 24                            # 礼物条左上角 x(鼠标拖动;缓存)
+        self.gift_y = 300                           # 左上角 y(默认左侧偏上,避开顶端歌单带)
+        self._gift_pix = None                       # 预合成卡片 pixmap 缓存(内容/字体/DPR 变时重建)
+        self._gift_drag = False                     # 是否正在拖礼物条(vs 拖整窗)
+        self._gift_drag_off = (0, 0)                # 拖动时鼠标相对礼物条左上角的偏移
         self.blank = False                          # 空白态:只画全绿背景(隐藏歌词时用,捕获帧=纯绿)
         # 未演唱态:歌曲已载入但主播还没开唱(进度 0、从未播放)。此时绿幕只出纯绿背景,
         # 不画歌词/音准线——队列点的第一首、唱完切到的下一首都装在开头暂停(见 pc-service
@@ -177,6 +187,7 @@ class KaraokeWindow(QtWidgets.QWidget):
         self._plain_cache.clear()
         self._setlist_pix = None        # 歌单用 font_small,字体变了要重建
         self._title_card = None         # 标题卡用同族字体,字体变了要重建
+        self._gift_pix = None           # 礼物卡片文字用同族字体,字体变了要重建
 
     def _flash_status(self, text, ms=2000):
         """左下角状态栏临时提示(如切字体),ms 后若没被新提示替换则清掉。"""
@@ -210,6 +221,7 @@ class KaraokeWindow(QtWidgets.QWidget):
             self._hotkey_pix = None
             self._setlist_pix = None
             self._title_card = None
+            self._gift_pix = None
 
         now = self.engine.current_ms()
         if self.engine.playing:             # 一旦开唱就记住:之后暂停在半途仍算"演唱中",照常显示
@@ -226,6 +238,8 @@ class KaraokeWindow(QtWidgets.QWidget):
             self._draw_lyrics(p, 0, cy_top, w, now)
         if self.show_setlist:               # 顶端滚动歌单(O 键;下边界=音轨顶,不覆盖)
             self._draw_setlist(p, w)
+        if self.show_gifts:                 # 礼物菜单(绿幕左侧竖排;独立拖动,pc-service 配置窗选礼物)
+            self._draw_gifts(p, w, h)
         self._draw_status(p, w, h, now)
         self._draw_hotkeys(p, w, h)
 
@@ -290,6 +304,88 @@ class KaraokeWindow(QtWidgets.QWidget):
         pitch_top, _, _ = self._layout()
         hi = max(0, pitch_top - self._setlist_h())
         self.setlist_y = int(max(0, min(hi, self.setlist_y + d * 24)))
+
+    # ---------------------------------------------------- 礼物菜单
+    def set_gifts(self, items):
+        """收到 pc-service 推的礼物条内容([{icon,text}],顺序即显示顺序)。内容变了才重建
+        pixmap(同 set_setlist 的 GIL 守卫:重建卡片=drawText+图标缩放,GUI 线程重活,内容没变
+        别白重建抢音频回调 GIL)。"""
+        new = [{"icon": str(it.get("icon", "")), "text": str(it.get("text", ""))}
+               for it in (items or [])]
+        if new == self.gift_items:
+            return
+        self.gift_items = new
+        self._gift_pix = None            # 内容变了才重建
+
+    def _build_gift_pix(self):
+        """把每个礼物预合成一张卡片 pixmap(不透明深色圆角底板 + 黑 keyline + 图标 + 白字),
+        一次性做好缓存;paintEvent 只 blit。统一卡片宽(取最宽的)竖排更整齐。填 self._gift_pix
+        = [(pixmap, 宽, 高)]。文字用 drawText(而非字形路径)以正确渲染 emoji;因坐在不透明
+        底板上,白字无需黑描边即绿幕干净。"""
+        self._gift_pix = []
+        if not self.gift_items:
+            return
+        dpr = self.devicePixelRatioF() or 1.0
+        icon, pad, gap = self.GIFT_ICON, self.GIFT_CARD_PAD, self.GIFT_ICON_GAP
+        tf = QtGui.QFont(self.font_big.family(), self.GIFT_TEXT_PT)
+        tf.setBold(True)
+        fm = QtGui.QFontMetrics(tf)
+        loaded, max_tw = [], 0
+        for it in self.gift_items:                 # 预载图标 + 量文字,先算统一卡片宽
+            ic = QtGui.QPixmap(it["icon"]) if it.get("icon") else QtGui.QPixmap()
+            if not ic.isNull():
+                ic = ic.scaled(int(icon * dpr), int(icon * dpr),
+                               QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                ic.setDevicePixelRatio(dpr)
+            txt = it.get("text", "")
+            max_tw = max(max_tw, fm.horizontalAdvance(txt) if txt else 0)
+            loaded.append((ic, txt))
+        has_text = max_tw > 0
+        card_w = pad + icon + (gap + max_tw if has_text else 0) + pad
+        card_h = pad + max(icon, fm.height()) + pad
+        for ic, txt in loaded:
+            pm = QtGui.QPixmap(int(card_w * dpr), int(card_h * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(QtCore.Qt.transparent)
+            p = QtGui.QPainter(pm)
+            p.setRenderHint(QtGui.QPainter.Antialiasing)
+            p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
+            # 底板:不透明深色圆角 + 黑 keyline(最外黑,绿幕干净抠)
+            p.setPen(QtGui.QPen(self.COL_OUTLINE, 2))
+            p.setBrush(self.GIFT_PLATE)
+            p.drawRoundedRect(QtCore.QRectF(1, 1, card_w - 2, card_h - 2),
+                              self.GIFT_RADIUS, self.GIFT_RADIUS)
+            if not ic.isNull():                    # 图标(左,竖直居中)
+                iw, ih = ic.width() / dpr, ic.height() / dpr
+                p.drawPixmap(QtCore.QPointF(pad + (icon - iw) / 2, (card_h - ih) / 2), ic)
+            if has_text and txt:                   # 自定义文字(右,白,竖直居中)
+                p.setPen(QtGui.QColor(255, 255, 255))
+                p.setFont(tf)
+                p.drawText(QtCore.QRectF(pad + icon + gap, 0, max_tw + 2, card_h),
+                           int(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft), txt)
+            p.end()
+            self._gift_pix.append((pm, card_w, card_h))
+
+    def _draw_gifts(self, p, w, h):
+        """从 (gift_x, gift_y) 竖排 blit 各礼物卡片。pixmap 预合成(见 _build_gift_pix),此处零重活。"""
+        if self._gift_pix is None:
+            self._build_gift_pix()
+        y = self.gift_y
+        for pm, cw, ch in self._gift_pix:
+            p.drawPixmap(QtCore.QPointF(self.gift_x, y), pm)
+            y += ch + self.GIFT_GAP
+
+    def _gift_bbox(self):
+        """礼物条整体外接矩形(鼠标命中检测拖动用);显隐关或无内容返回 None。"""
+        if not self.show_gifts:
+            return None
+        if self._gift_pix is None:
+            self._build_gift_pix()
+        if not self._gift_pix:
+            return None
+        bw = max(cw for _, cw, _ in self._gift_pix)
+        bh = sum(ch for _, _, ch in self._gift_pix) + self.GIFT_GAP * (len(self._gift_pix) - 1)
+        return QtCore.QRectF(self.gift_x, self.gift_y, bw, bh)
 
     def _tick_paint(self):
         """60fps 心跳:仅当窗口可见时才请求重绘。隐藏(服务托管默认态)时不排绘制,省 CPU。"""
@@ -595,6 +691,17 @@ class KaraokeWindow(QtWidgets.QWidget):
     TITLE_MAX = 5500        # 最长显示(ms);实际取 min(此值, 首句起点-600)
     TITLE_FADE_IN = 400
     TITLE_FADE_OUT = 1200
+    # ── 礼物菜单(绿幕左侧竖排"礼物→权益"引导条)──────────────────────
+    # 每张卡片 = 不透明深色圆角底板 + 黑 keyline + 礼物图标(左) + 自定义文字(右,白)。
+    # **底板必须不透明**:礼物图是彩色半透明 PNG,直接贴绿抠像会留绿边(同歌词黑 keyline 原理);
+    # 底板最外一圈黑,抗锯齿边缘落黑上、绿幕干净抠。文字坐在不透明底板上,故白字无需描边即干净。
+    GIFT_ICON = 56          # 图标显示边长(px)
+    GIFT_CARD_PAD = 9       # 卡片内边距
+    GIFT_ICON_GAP = 9       # 图标与文字间距
+    GIFT_GAP = 10           # 卡片竖直间距
+    GIFT_TEXT_PT = 18       # 自定义文字字号
+    GIFT_RADIUS = 13        # 底板圆角
+    GIFT_PLATE = QtGui.QColor(22, 24, 32)   # 不透明深色底板(不透明!否则透绿留边)
 
     @staticmethod
     def _outlined(p, path, fill, strokes):
@@ -723,7 +830,7 @@ class KaraokeWindow(QtWidgets.QWidget):
         (右对齐,不与左下播放信息横向撞)。静态文案,建一次缓存。"""
         if self._hotkey_pix is None:
             lines = ["←→ 步退/进   ↑↓ 升降调   R 原唱/伴奏",
-                     "P 音准线   Q 字体   O 歌单   Ctrl+↑↓ 移歌单"]
+                     "P 音准线   Q 字体   O 歌单   G 礼物   Ctrl+↑↓ 移歌单"]
             fm = QtGui.QFontMetrics(self.font_status)
             self._hotkey_pix = [(fm.horizontalAdvance(s), self._make_line_pixmap(
                 [(s, fm.horizontalAdvance(s))], self.font_status,
@@ -760,6 +867,8 @@ class KaraokeWindow(QtWidgets.QWidget):
             self.show_pitch = not self.show_pitch   # 音准线显隐(pc-service 经 STATE 回读同步手机)
         elif k == QtCore.Qt.Key_O:
             self.show_setlist = not self.show_setlist   # 顶端歌单显隐(pc-service 回读缓存,同 P)
+        elif k == QtCore.Qt.Key_G:
+            self.show_gifts = not self.show_gifts       # 礼物菜单显隐(pc-service 回读缓存,同 P/O)
         elif k == QtCore.Qt.Key_Q:
             self._apply_font(self.font_idx + 1)     # 循环切歌词字体(pc-service 经 STATE 回读缓存)
             self._flash_status("字体: " + self.FONTS[self.font_idx][0])
@@ -864,6 +973,8 @@ class KaraokeWindow(QtWidgets.QWidget):
                   "vol": self.engine.volume_pct, "pitch": self.show_pitch,
                   "font": self.font_idx,
                   "setlist_show": self.show_setlist, "setlist_y": self.setlist_y,
+                  "gifts_show": self.show_gifts,
+                  "gift_x": int(self.gift_x), "gift_y": int(self.gift_y),
                   "mid": self.song.mid, "title": self.song.title,
                   "artist": self.song.artist}
             if self._saved_pos is not None:   # 有真实位置(显示过 / pc-service 已下发)才上报,免把 (0,0) 缓存进去
@@ -876,14 +987,26 @@ class KaraokeWindow(QtWidgets.QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == QtCore.Qt.LeftButton:
-            self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            # 命中检测:按在礼物条上 → 单独拖礼物条;否则 → 拖整窗(摆捕获区,原行为)
+            lp = e.position().toPoint()
+            box = self._gift_bbox()
+            if box is not None and box.contains(QtCore.QPointF(lp)):
+                self._gift_drag = True
+                self._gift_drag_off = (lp.x() - self.gift_x, lp.y() - self.gift_y)
+            else:
+                self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, e):
-        if self._drag_pos is not None:
+        if self._gift_drag:                          # 拖礼物条:改 gift_x/gift_y(夹在窗内,不拖丢)
+            lp = e.position().toPoint()
+            self.gift_x = int(max(0, min(self.width() - 24, lp.x() - self._gift_drag_off[0])))
+            self.gift_y = int(max(0, min(self.height() - 24, lp.y() - self._gift_drag_off[1])))
+        elif self._drag_pos is not None:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
+        self._gift_drag = False
         if self.isVisible():
             self._saved_pos = (self.x(), self.y())   # 拖动结束即记住位置(下次 show 恢复)
 
@@ -1042,6 +1165,20 @@ def main():
                 try:
                     win.setlist_y = int(arg)
                 except ValueError:
+                    pass
+            # 礼物菜单:内容(pc-service 配置窗选礼物+自定义文字推来)/ 显隐 / 位置
+            elif c == "gifts" and arg is not None:
+                try:
+                    win.set_gifts(json.loads(arg))
+                except Exception:
+                    pass
+            elif c == "gifts_show" and arg is not None:
+                win.show_gifts = (arg == "1")
+            elif c == "gift_pos" and arg is not None:
+                try:
+                    xs, ys = arg.split()
+                    win.gift_x, win.gift_y = int(xs), int(ys)
+                except Exception:
                     pass
             # 窗口桌面位置(pc-service 据 state_cache.json 在拉起时下发,恢复上次关闭时的位置)
             elif c == "pos" and arg is not None:

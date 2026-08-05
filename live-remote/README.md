@@ -153,7 +153,7 @@ pc-service 把播放器 IPC 接进 WebSocket,并加曲库列表/点歌队列(供
   快照里的 `bgm_playing`)——否则子进程推来按键前的旧快照会把状态翻回去,后续 `playpause` 方向反打,表现为
   "手动暂停 BGM 后自动化失灵"。③新增有方向的 `{"cmd":"bgm","action":"play"/"pause"}`(幂等),联动全部改用。
 - **跨重启持久缓存**:声卡场景 + 通道静音记录 + 演唱音量 + **Studio One 显隐** + **音准线显隐** + **歌词字体**
-  + **顶端歌单(内容/显隐/位置)** + **K歌播放器窗口桌面位置** + **演唱者(主播名)**存 `pc-service/state_cache.json`
+  + **顶端歌单(内容/显隐/位置)** + **礼物菜单(选中礼物+文字/显隐/位置)** + **K歌播放器窗口桌面位置** + **演唱者(主播名)**存 `pc-service/state_cache.json`
   (gitignore),变更即原子写盘,服务重启时恢复
   (静音记录只恢复不发 MIDI;`k_vol`/`pitch_visible`/`k_font`/`setlist*`/`player_x,player_y`/`performer` 在拉起
   播放器后下发一次(`vol`/`pitch`/`font`/`setlist`/`setlist_show`/`setlist_y`/`pos x y`/`performer`);`studio_visible`
@@ -167,5 +167,15 @@ pc-service 把播放器 IPC 接进 WebSocket,并加曲库列表/点歌队列(供
 - **音准线显隐遥控**:WS `{"cmd":"pitch_toggle"}` → pc-service 翻转 `STATE["pitch_visible"]`、发 `pitch 0/1`
   给播放器、存盘、广播;手机遥控页"窗口开关"区在"K歌歌词"下加了"音准线 显示/隐藏"开关(pc-service 对音准线
   是权威源,不从播放器 STATE 回读,避免启动竞态)。
+- **礼物菜单(2026-08-05)**:播放器绿幕**左侧竖排"礼物→权益"引导条**(抖音礼物图标 + 自定义文字,如
+  🎈点歌 / 🍰插队),引导观众打赏。链路三段:①**目录抓取** `gifts.py` 抓抖音 `webcast/gift/list?aid=1128`
+  (匿名可取,`data.gifts[]` 含 id/name/diamond_count/icon)→ 缓存 `gift_cache/gifts_catalog.json` + 按需下图标
+  PNG 到 `gift_cache/icons/`,离线优先。②**配置窗**:托盘「礼物菜单配置」(单实例,`_gift_root`)——左目录搜索
+  勾选(点「＋加入」)、右已选可**填自定义文字 + ↑↓排序 + ✕删**;保存 `set_gift_config([{id,text}])` → 存
+  `STATE["gifts"]` + `_push_gifts`(去重,同 `_push_setlist`)把 `gifts.resolve` 出的 `[{icon:绝对路径,text}]`
+  经 `gifts <json>` 推播放器。③**显隐/位置**:WS `{"cmd":"gifts_toggle"}` 翻 `STATE["gifts_visible"]` 发
+  `gifts_show 0/1`;播放器 `G` 键显隐、**鼠标单独拖动**礼物条(命中检测),`gifts_show/gift_x/gift_y` 经 STATE
+  回读缓存;拉起播放器时统一重推。手机遥控页"窗口开关"区加"礼物菜单 显示/隐藏"、托盘加"礼物菜单显示"勾选项。
+  **礼物图必须坐不透明底板**(彩色半透明 PNG 裸贴绿会留绿边,见 karaoke-player README「关键技术决策」)。
 - **伴奏音量走感知曲线**:手机媒体音量%→伴奏增益用**平方曲线**(增益=（%/100)²,见 karaoke-player
   `audio_engine._gain_for`),低档位真正变小(最小档由线性 -23dB 降到 -46dB)、控制更细。

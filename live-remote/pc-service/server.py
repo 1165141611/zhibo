@@ -62,6 +62,7 @@ import karaoke_win
 import library
 import mobile_import
 import karaoke_data
+import gifts
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -233,6 +234,11 @@ STATE = {
     "setlist": [],             # 歌单 mid 列表(曲库管理页勾选,跨重启缓存;推给播放器顶端滚动字幕)
     "setlist_visible": True,   # 顶端歌单显隐(播放器 O 键,跨重启缓存)
     "setlist_y": 24,           # 顶端歌单竖直位置(播放器 Ctrl+↑↓,跨重启缓存)
+    # ── 礼物菜单(绿幕左侧竖排"礼物→权益"引导条;托盘配置窗选礼物+自定义文字)──
+    "gifts": [],               # [{id, text}] 按显示顺序(配置窗选,跨重启缓存;_push_gifts 解析成图标推播放器)
+    "gifts_visible": True,     # 礼物菜单显隐(播放器 G 键 / 手机遥控,跨重启缓存)
+    "gift_x": 24,              # 礼物条左上角 x(播放器鼠标拖动,跨重启缓存)
+    "gift_y": 300,             # 礼物条左上角 y(同上)
     "player_x": None, "player_y": None,   # K歌播放器窗口桌面位置(拖动记忆,跨重启缓存)
     "performer": "八门官上",   # 演唱者(主播名):开头标题卡"演唱:<名>";托盘可改,跨重启缓存
     "k_mid": "", "k_title": "", "k_artist": "",
@@ -293,6 +299,10 @@ def _save_persist():
                 "setlist": list(STATE.get("setlist", [])),
                 "setlist_visible": bool(STATE.get("setlist_visible", True)),
                 "setlist_y": int(STATE.get("setlist_y", 24)),
+                "gifts": list(STATE.get("gifts", [])),
+                "gifts_visible": bool(STATE.get("gifts_visible", True)),
+                "gift_x": int(STATE.get("gift_x", 24)),
+                "gift_y": int(STATE.get("gift_y", 300)),
                 "player_x": STATE.get("player_x"),
                 "player_y": STATE.get("player_y"),
                 "performer": STATE.get("performer", "八门官上"),
@@ -352,6 +362,17 @@ def _restore_persist():
             STATE["setlist_y"] = int(data["setlist_y"])
         except Exception:
             pass
+    if isinstance(data.get("gifts"), list):          # 礼物菜单内容(拉起播放器后统一推,见 start_player)
+        STATE["gifts"] = [{"id": int(g["id"]), "text": str(g.get("text", ""))}
+                          for g in data["gifts"] if g.get("id") is not None]
+    if data.get("gifts_visible") is not None:
+        STATE["gifts_visible"] = bool(data["gifts_visible"])
+    for _k in ("gift_x", "gift_y"):
+        if data.get(_k) is not None:
+            try:
+                STATE[_k] = int(data[_k])
+            except Exception:
+                pass
     for _k in ("player_x", "player_y"):          # 播放器窗口位置(拉起播放器后统一下发,见 start_player)
         if data.get(_k) is not None:
             try:
@@ -829,6 +850,7 @@ _tray_thread_id = None  # 托盘消息泵所在线程 id;update_menu 只能在�
 _tray_hwnd = None       # 托盘消息窗 HWND(PostMessage 跨线程唤醒托盘线程刷新用)
 _lib_root = None        # 曲库管理窗 Tk 根(None=未开):托盘勾选反映开关态 + 单实例 + 再点即关
 _scan_root = None       # 扫描导入窗 Tk 根(同上)
+_gift_root = None       # 礼物菜单配置窗 Tk 根(同上)
 _last_import_mid = None  # 最近一首入库的 mid(=当前气泡通知对应的歌;点气泡→改它)
 # 自定义窗口消息:WM_USER(0x400) pystray 自用 +10(STOP)/+11(NOTIFY);我们用 +20 触发刷新
 WM_TRAY_REFRESH = 0x400 + 20
@@ -1111,6 +1133,11 @@ async def _handle_cmd(data):
         STATE["setlist_visible"] = v
         _player_send("setlist_show " + ("1" if v else "0"))
         _save_persist()          # 顶端歌单显隐跨重启持久(同 O 键回读那套)
+    elif cmd == "gifts_toggle":
+        v = not STATE.get("gifts_visible", True)
+        STATE["gifts_visible"] = v
+        _player_send("gifts_show " + ("1" if v else "0"))
+        _save_persist()          # 礼物菜单显隐跨重启持久(同 G 键回读那套)
     # ── K歌:点歌队列 + 播放控制 ──
     elif cmd == "kqueue_add":
         k_enqueue(data.get("mid"))
@@ -1267,6 +1294,9 @@ def _player_reader(proc):
                 font_before = STATE.get("k_font")
                 slv_before = STATE.get("setlist_visible")
                 sly_before = STATE.get("setlist_y")
+                gv_before = STATE.get("gifts_visible")
+                gx_before = STATE.get("gift_x")
+                gy_before = STATE.get("gift_y")
                 px_before = STATE.get("player_x")
                 py_before = STATE.get("player_y")
                 STATE.update({
@@ -1278,6 +1308,10 @@ def _player_reader(proc):
                     "k_font": st.get("font", STATE.get("k_font", 0)),
                     "setlist_visible": st.get("setlist_show", STATE.get("setlist_visible", True)),
                     "setlist_y": st.get("setlist_y", STATE.get("setlist_y", 24)),
+                    # 回读礼物菜单显隐(G 键)+ 位置(鼠标拖动):同步缓存 + 推手机
+                    "gifts_visible": st.get("gifts_show", STATE.get("gifts_visible", True)),
+                    "gift_x": st.get("gift_x", STATE.get("gift_x", 24)),
+                    "gift_y": st.get("gift_y", STATE.get("gift_y", 300)),
                     # 播放器窗口桌面位置(拖动记忆,跨重启缓存;仅缓存,不推手机——纯 PC 侧信息)
                     "player_x": st.get("win_x", STATE.get("player_x")),
                     "player_y": st.get("win_y", STATE.get("player_y")),
@@ -1288,6 +1322,9 @@ def _player_reader(proc):
                         or STATE.get("k_font") != font_before
                         or STATE.get("setlist_visible") != slv_before
                         or STATE.get("setlist_y") != sly_before
+                        or STATE.get("gifts_visible") != gv_before
+                        or STATE.get("gift_x") != gx_before
+                        or STATE.get("gift_y") != gy_before
                         or STATE.get("player_x") != px_before
                         or STATE.get("player_y") != py_before):
                     _save_persist()
@@ -1353,6 +1390,10 @@ def start_player():
         _player_send("font " + str(int(STATE.get("k_font", 0))))
         _player_send("setlist_show " + ("1" if STATE.get("setlist_visible", True) else "0"))
         _player_send("setlist_y " + str(int(STATE.get("setlist_y", 24))))
+        # 礼物菜单:显隐 + 位置 + 内容(拉起必推,绕过去重缓存)
+        _player_send("gifts_show " + ("1" if STATE.get("gifts_visible", True) else "0"))
+        _player_send("gift_pos %d %d" % (int(STATE.get("gift_x", 24)), int(STATE.get("gift_y", 300))))
+        _push_gifts(force=True)
         if STATE.get("player_x") is not None and STATE.get("player_y") is not None:
             _player_send("pos %d %d" % (int(STATE["player_x"]), int(STATE["player_y"])))  # 恢复上次窗口位置
         _player_send("performer " + str(STATE.get("performer", "八门官上")))   # 演唱者(开头标题卡)
@@ -1454,6 +1495,15 @@ def _toggle_scan_window(icon=None, item=None):
         _open_scan_window()
 
 
+def _toggle_gift_window(icon=None, item=None):
+    """托盘「礼物菜单配置」:未开→开;已开→关窗(单实例)。勾选态随 _gift_root 反映。"""
+    r = _gift_root
+    if r is not None:
+        _ui_post(lambda w=r: _safe_destroy(w))
+    else:
+        _open_gift_window()
+
+
 def _on_lib_change():
     """曲库变化:刷托盘 + 推手机 + 重推歌单(歌名可能被迁移修正,或新歌入库)。"""
     refresh_tray()
@@ -1531,6 +1581,39 @@ def _push_setlist(force=False):
         return
     _last_setlist_pushed = titles
     _player_send("setlist " + json.dumps(titles, ensure_ascii=False))
+
+
+_last_gifts_pushed = None   # 上次已推给播放器的礼物条(去重用)
+
+
+def _push_gifts(force=False):
+    """把礼物菜单(STATE["gifts"]=[{id,text}])解析成 [{icon:图标绝对路径, text}] 推给播放器。
+    配置窗保存 / 播放器拉起时调。★ 内容没变则跳过(force 仅拉起时用):同 _push_setlist,
+    避免白重推让播放器重建卡片 pixmap(drawText+图标缩放,GUI 线程重活)抢音频回调 GIL。"""
+    global _last_gifts_pushed
+    try:
+        resolved = gifts.resolve(STATE.get("gifts", []))
+    except Exception as e:
+        print(f"[GIFTS] 解析失败: {e}")
+        return
+    if not force and resolved == _last_gifts_pushed:
+        return
+    _last_gifts_pushed = resolved
+    _player_send("gifts " + json.dumps(resolved, ensure_ascii=False))
+
+
+def set_gift_config(items):
+    """礼物菜单配置窗「保存」:items=[{id,text}] 按显示顺序。更新 STATE + 存盘 + 推播放器 + 推手机。"""
+    clean = []
+    for g in items or []:
+        try:
+            clean.append({"id": int(g["id"]), "text": str(g.get("text", "")).strip()})
+        except Exception:
+            continue
+    STATE["gifts"] = clean
+    _save_persist()
+    _push_gifts(force=True)          # 内容确实变了,强推
+    _threadsafe_broadcast()
 
 
 def set_setlist_member(mid, on):
@@ -2757,6 +2840,244 @@ def _lib_delete(mid):
     library.delete(mid)                         # 删文件 + 清单 + _on_lib_change(刷托盘 + 推库列表)
 
 
+def _open_gift_window(selftest=False):
+    """托盘「礼物菜单配置」:选礼物 + 填自定义文字 + 排序,推给播放器绿幕左侧竖排显示。
+    - 左:礼物目录(搜索过滤;每行 名 + 抖币价 +「＋加入」)。目录 1373 项,只渲染过滤后前 120 条,
+      靠搜索缩小(不做全量分页——礼物按名找即可)。「刷新目录」后台重抓 gifts.fetch_catalog。
+    - 右:已选(=显示顺序);每行 缩略图 + 名 + 自定义文字输入框 + ↑ ↓ 排序 + ✕ 删除。
+      缩略图只对已选的几个下载(gifts.icon_path 用到才下),不批量拉 1373 张。
+    - 保存:set_gift_config([{id,text}]) → 存盘 + 推播放器 + 推手机。
+    独立性同曲库/扫描窗:常驻根 Toplevel + close_guard 善后 + 单实例(_gift_root)。"""
+
+    def _win():
+        global _gift_root
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+            from PIL import Image, ImageTk
+
+            root = tk.Tk() if selftest else tk.Toplevel(_ui_root)
+            root.title("礼物菜单配置")
+            root.geometry("760x520")
+            _gift_root = root
+            if not selftest:
+                def _on_closed():
+                    global _gift_root
+                    _gift_root = None
+                    refresh_tray()
+                _tk_win_close_guard(root, _on_closed)
+                refresh_tray()
+            root.attributes("-topmost", True)
+
+            catalog = gifts.fetch_catalog()                 # [{id,name,diamond,icon_url}]
+            cat_by_id = {int(it["id"]): it for it in catalog if it.get("id") is not None}
+            # 工作副本:已选礼物 [{id,name,text}](名取自目录,缺失回退保存值)
+            sel = []
+            for g in STATE.get("gifts", []):
+                gid = int(g["id"])
+                nm = (cat_by_id.get(gid) or {}).get("name", "")
+                sel.append({"id": gid, "name": nm, "text": str(g.get("text", ""))})
+            thumbs = {}           # id → ImageTk.PhotoImage(防 GC)
+            text_vars = {}        # id → StringVar(自定义文字输入)
+
+            # ── 顶部:搜索 + 刷新 + 计数 ──
+            top = tk.Frame(root); top.pack(fill="x", padx=10, pady=(10, 4))
+            tk.Label(top, text="搜索礼物:").pack(side="left")
+            q = tk.StringVar(master=root)
+            tk.Entry(top, textvariable=q, width=18).pack(side="left", padx=6)
+            cnt = tk.StringVar(master=root)
+            tk.Label(top, textvariable=cnt, fg="#888888").pack(side="left", padx=6)
+
+            def _refresh_catalog():
+                def _work():
+                    gifts.fetch_catalog(refresh=True)
+                    try:
+                        root.after(0, lambda: (_reload_cat(), None))
+                    except Exception:
+                        pass
+                threading.Thread(target=_work, daemon=True).start()
+            tk.Button(top, text="刷新目录", command=_refresh_catalog).pack(side="right")
+
+            body = tk.Frame(root); body.pack(fill="both", expand=True, padx=10, pady=4)
+            # 左:目录列表(Canvas 滚动)
+            left = tk.LabelFrame(body, text="礼物目录(点「＋加入」)")
+            left.pack(side="left", fill="both", expand=True)
+            lc = tk.Canvas(left, highlightthickness=0, width=320)
+            lvsb = ttk.Scrollbar(left, orient="vertical", command=lc.yview)
+            lvsb.pack(side="right", fill="y"); lc.pack(side="left", fill="both", expand=True)
+            l_inner = tk.Frame(lc, bg="#ffffff")
+            l_wid = lc.create_window((0, 0), window=l_inner, anchor="nw")
+            l_inner.bind("<Configure>", lambda e: lc.configure(scrollregion=lc.bbox("all")))
+            lc.bind("<Configure>", lambda e: lc.itemconfig(l_wid, width=e.width))
+            lc.bind("<Enter>", lambda e: lc.bind_all(
+                "<MouseWheel>", lambda ev: lc.yview_scroll(int(-ev.delta / 120), "units")))
+            lc.bind("<Leave>", lambda e: lc.unbind_all("<MouseWheel>"))
+
+            # 右:已选(顺序 + 文字 + 排序 + 删)
+            right = tk.LabelFrame(body, text="已选(=显示顺序,上→下)")
+            right.pack(side="right", fill="both", expand=True, padx=(8, 0))
+            rc = tk.Canvas(right, highlightthickness=0, width=360)
+            rvsb = ttk.Scrollbar(right, orient="vertical", command=rc.yview)
+            rvsb.pack(side="right", fill="y"); rc.pack(side="left", fill="both", expand=True)
+            r_inner = tk.Frame(rc, bg="#ffffff")
+            r_wid = rc.create_window((0, 0), window=r_inner, anchor="nw")
+            r_inner.bind("<Configure>", lambda e: rc.configure(scrollregion=rc.bbox("all")))
+            rc.bind("<Configure>", lambda e: rc.itemconfig(r_wid, width=e.width))
+            rc.bind("<Enter>", lambda e: rc.bind_all(
+                "<MouseWheel>", lambda ev: rc.yview_scroll(int(-ev.delta / 120), "units")))
+            rc.bind("<Leave>", lambda e: rc.unbind_all("<MouseWheel>"))
+
+            def _thumb(gid):
+                """已选项缩略图(40px);下载/解码失败返回 None(只显文字)。缓存防 GC。"""
+                if gid in thumbs:
+                    return thumbs[gid]
+                url = (cat_by_id.get(gid) or {}).get("icon_url", "")
+                p = gifts.icon_path(gid, url)
+                if not p:
+                    return None
+                try:
+                    im = Image.open(p).convert("RGBA")
+                    im.thumbnail((40, 40))
+                    bg = Image.new("RGBA", (40, 40), (255, 255, 255, 0))
+                    bg.paste(im, ((40 - im.width) // 2, (40 - im.height) // 2), im)
+                    ph = ImageTk.PhotoImage(bg)
+                    thumbs[gid] = ph
+                    return ph
+                except Exception:
+                    return None
+
+            def _sync_text_vars():
+                for it in sel:
+                    if it["id"] in text_vars:
+                        it["text"] = text_vars[it["id"]].get()
+
+            def _add(gid):
+                _sync_text_vars()
+                if any(s["id"] == gid for s in sel):
+                    return
+                nm = (cat_by_id.get(gid) or {}).get("name", "")
+                sel.append({"id": gid, "name": nm, "text": ""})
+                _render_sel()
+
+            def _remove(gid):
+                _sync_text_vars()
+                sel[:] = [s for s in sel if s["id"] != gid]
+                _render_sel()
+
+            def _swap(i, j):
+                _sync_text_vars()
+                if 0 <= i < len(sel) and 0 <= j < len(sel):
+                    sel[i], sel[j] = sel[j], sel[i]
+                    _render_sel()
+
+            def _render_sel():
+                for w in r_inner.winfo_children():
+                    w.destroy()
+                text_vars.clear()
+                for i, it in enumerate(sel):
+                    gid = it["id"]
+                    rf = tk.Frame(r_inner, bg="#ffffff", bd=1, relief="solid")
+                    rf.pack(fill="x", padx=4, pady=3)
+                    ph = _thumb(gid)
+                    if ph is not None:
+                        tk.Label(rf, image=ph, bg="#ffffff").grid(row=0, column=0, rowspan=2, padx=4, pady=4)
+                    else:
+                        tk.Label(rf, text="?", width=4, bg="#eeeeee").grid(
+                            row=0, column=0, rowspan=2, padx=4, pady=4)
+                    tk.Label(rf, text=it["name"] or "(礼物%d)" % gid, anchor="w",
+                             bg="#ffffff", fg="#111111", font=("", 9, "bold")).grid(
+                        row=0, column=1, sticky="w")
+                    tv = tk.StringVar(master=root, value=it["text"])
+                    text_vars[gid] = tv
+                    ef = tk.Frame(rf, bg="#ffffff"); ef.grid(row=1, column=1, sticky="w")
+                    tk.Label(ef, text="文字:", bg="#ffffff", fg="#666666").pack(side="left")
+                    tk.Entry(ef, textvariable=tv, width=16).pack(side="left")
+                    bf = tk.Frame(rf, bg="#ffffff"); bf.grid(row=0, column=2, rowspan=2, padx=4)
+                    tk.Button(bf, text="↑", width=2, takefocus=0,
+                              command=lambda i=i: _swap(i, i - 1)).pack(side="left")
+                    tk.Button(bf, text="↓", width=2, takefocus=0,
+                              command=lambda i=i: _swap(i, i + 1)).pack(side="left")
+                    tk.Button(bf, text="✕", width=2, fg="#c0392b", takefocus=0,
+                              command=lambda gid=gid: _remove(gid)).pack(side="left", padx=(4, 0))
+                rc.yview_moveto(0)
+
+            def _render_cat():
+                for w in l_inner.winfo_children():
+                    w.destroy()
+                kw = q.get().strip().lower()
+                items = [it for it in catalog
+                         if not kw or kw in (it.get("name", "").lower())]
+                shown = items[:120]
+                cnt.set("共 %d,显示 %d" % (len(items), len(shown)))
+                for it in shown:
+                    gid = int(it["id"])
+                    rf = tk.Frame(l_inner, bg="#ffffff")
+                    rf.pack(fill="x")
+                    tk.Button(rf, text="＋加入", width=6, takefocus=0,
+                              command=lambda gid=gid: _add(gid)).pack(side="left", padx=4, pady=2)
+                    tk.Label(rf, text=it.get("name", "") or ("礼物%d" % gid), anchor="w",
+                             bg="#ffffff", fg="#111111").pack(side="left")
+                    tk.Label(rf, text="  %d 抖币" % int(it.get("diamond", 0)), anchor="e",
+                             bg="#ffffff", fg="#999999").pack(side="right", padx=6)
+
+            def _reload_cat():
+                nonlocal catalog, cat_by_id
+                catalog = gifts.fetch_catalog()
+                cat_by_id = {int(it["id"]): it for it in catalog if it.get("id") is not None}
+                for it in sel:                       # 名字可能刷新
+                    it["name"] = (cat_by_id.get(it["id"]) or {}).get("name", it["name"])
+                _render_cat(); _render_sel()
+
+            _deb = {"id": None}
+
+            def _on_query(*_a):
+                if _deb["id"] is not None:
+                    try:
+                        root.after_cancel(_deb["id"])
+                    except Exception:
+                        pass
+                _deb["id"] = root.after(200, _render_cat)
+            q.trace_add("write", _on_query)
+
+            # ── 底部:提示 + 保存/关闭 ──
+            bar = tk.Frame(root); bar.pack(fill="x", padx=10, pady=(0, 10))
+            tk.Label(bar, text="保存后即推送到播放器绿幕(左侧竖排);播放器内可鼠标拖动摆放。",
+                     fg="#888888").pack(side="left")
+
+            def _save():
+                _sync_text_vars()
+                set_gift_config([{"id": s["id"], "text": s["text"]} for s in sel])
+                if not selftest:
+                    root.destroy()
+            tk.Button(bar, text="关闭", width=8, command=root.destroy).pack(side="right")
+            tk.Button(bar, text="保存", width=10, command=_save).pack(side="right", padx=6)
+
+            root.after_idle(lambda: (_render_cat(), _render_sel()))
+            root.after(120, root.focus_force)
+            if selftest:
+                def _auto():
+                    print("[GIFTWIN-TEST] catalog=%d sel=%d" % (len(catalog), len(sel)), flush=True)
+                    if catalog:
+                        _add(int(catalog[0]["id"]))
+                        print("[GIFTWIN-TEST] after add sel=%d" % len(sel), flush=True)
+                    root.after(300, root.destroy)
+                root.after(600, _auto)
+                root.mainloop()
+        except Exception as ex:
+            print(f"[GIFT] 礼物配置窗失败: {ex}")
+            if not selftest:
+                try:
+                    root.destroy()
+                except Exception:
+                    _gift_root = None
+                    refresh_tray()
+
+    if selftest:
+        threading.Thread(target=_tk_window_thread(_win), daemon=True).start()
+    else:
+        _ui_post(_win)
+
+
 def run_tray(url):
     global _tray_icon, _tray_thread_id
     _tray_thread_id = threading.get_ident()   # 记录托盘线程,refresh_tray 只在此线程改菜单
@@ -2810,6 +3131,14 @@ def run_tray(url):
     def on_toggle_studio(icon, item):
         _toggle_studio_visible()       # Studio One 显隐(与 App 同步,见 _toggle_studio_visible)
 
+    def on_toggle_gifts(icon, item):
+        v = not STATE.get("gifts_visible", True)
+        STATE["gifts_visible"] = v
+        _player_send("gifts_show " + ("1" if v else "0"))
+        _save_persist()
+        refresh_tray()
+        _threadsafe_broadcast()
+
     def on_edit_performer(icon, item):
         _open_performer_dialog()       # 编辑演唱者(主播名,开头标题卡用)
 
@@ -2826,6 +3155,9 @@ def run_tray(url):
         # 扫描导入:同款勾选式开关
         pystray.MenuItem("扫描导入歌曲", _toggle_scan_window,
                          checked=lambda i: _scan_root is not None),
+        # 礼物菜单配置:同款勾选式开关(选礼物+自定义文字,推播放器绿幕竖排)
+        pystray.MenuItem("礼物菜单配置", _toggle_gift_window,
+                         checked=lambda i: _gift_root is not None),
         # 演唱者(主播名):点击编辑,开头标题卡"演唱:<名>"用
         pystray.MenuItem(lambda i: f"演唱者：{STATE.get('performer', '八门官上')}", on_edit_performer),
         pystray.Menu.SEPARATOR,
@@ -2835,6 +3167,8 @@ def run_tray(url):
         pystray.MenuItem(
             "K歌歌词", on_toggle_karaoke,
             checked=lambda i: STATE["player_visible"]),   # 用权威状态(player 经VIS上报),不重读win32免竞态
+        pystray.MenuItem("礼物菜单显示", on_toggle_gifts,
+                         checked=lambda i: STATE.get("gifts_visible", True)),
         pystray.MenuItem("退出", do_quit),
     )
     _tray_icon = pystray.Icon("live_remote", image, "直播遥控 · 后台服务", menu)

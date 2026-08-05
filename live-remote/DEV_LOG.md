@@ -1010,3 +1010,31 @@ vkey 授权流按连接限速**(单连接~210KB/s≈5倍实时码率,"够流畅�
 
 **教训**:长驻托盘服务里反复弹的 Tk 窗口,别每次 `tk.Tk()` 重建解释器——常驻单根 + Toplevel 复用最省;跨线程操作 Tk 一律
 走"UI 线程自有定时器抽队列",不跨线程碰 Tcl;窗口里的重导入(numpy/网络库)预热到后台线程,别压在 Tk 线程首帧前。
+
+## 二十、礼物菜单:绿幕左侧竖排"礼物→权益"引导条(2026-08-05)
+
+**目标**:直播绿幕上加一列礼物引导条(抖音礼物图标 + 自定义文字,如 🎈点歌 / 🍰插队),引导观众打赏。
+静态展示(非响应真实礼物事件);主播能自选礼物、填每个礼物对应的权益文字、鼠标拖动摆放。
+
+**链路三段**:
+1. **目录抓取** `pc-service/gifts.py`:GET 抖音 `webcast/gift/list?aid=1128`(**匿名可取,不需 room_id/cookie**;
+   `data.gifts[]` 含 `id`/`name`/`diamond_count`/`icon.url_list`)→ 缓存 `gift_cache/gifts_catalog.json`(1373 项)
+   + 图标 PNG 按 id **用到才下**到 `gift_cache/icons/`。离线优先,`fetch_catalog(refresh=True)` 才重抓,联网失败回退缓存。
+2. **配置窗**:托盘「礼物菜单配置」(单实例 `_gift_root`,常驻根 Toplevel)——左目录搜索勾选(点「＋加入」,只渲染
+   过滤后前 120 条,靠搜索缩小,不为 1373 项做全量分页/批量下图);右已选 = 缩略图(只对已选下载)+ 名 + **自定义
+   文字输入 + ↑↓ 排序 + ✕ 删**。保存 `set_gift_config([{id,text}])` → 存 `STATE["gifts"]` + `_push_gifts`。
+3. **推送/显隐/位置**:`_push_gifts`(去重,同 `_push_setlist` 的 GIL 守卫)把 `gifts.resolve` 出的
+   `[{icon:图标绝对路径, text}]` 经 IPC `gifts <json>` 推播放器;播放器预合成每个礼物成一张 pixmap 竖排 blit。
+   显隐 WS `{"cmd":"gifts_toggle"}` → `gifts_show 0/1`;播放器 `G` 键 + **鼠标单独拖动**礼物条(命中检测:按在条上
+   拖它、否则拖整窗);`gifts_show/gift_x/gift_y` 经播放器 STATE 回读缓存,拉起播放器时统一重推。
+
+**绿幕坑(核心)**:抖音礼物图是**彩色半透明 PNG**,直接贴纯绿会被抠像留绿边(软边与绿混合)、且图内绿/青色块会
+被抠穿。修法同歌词/音准线:每个礼物坐一张**不透明深色圆角底板 + 最外一圈黑 keyline**(抗锯齿边缘落黑上,绿幕干净
+抠;文字坐不透明底板故白字无需描边;emoji 走 `drawText` 才出彩色,非字形路径)。卡片**预合成 QPixmap 缓存一次**
+(内容/字体/DPR 变才重建),`paintEvent` 只 blit——图标缩放 + drawText 是 GUI 线程重活,绝不能每帧做(同 setlist 教训)。
+
+**跨端**:手机遥控页"窗口开关"区加"礼物菜单 显示/隐藏"(`gifts_toggle`,`giftsVisible` 随 `state` 广播);
+托盘"礼物菜单显示"勾选项。跨重启缓存 `STATE["gifts"]/gifts_visible/gift_x/gift_y` 进 `state_cache.json`。
+
+**教训**:任何要叠到绿幕上的彩色/半透明图,一律先垫不透明底板 + 黑 keyline,别指望抠像能干净处理软边;
+外部图标资源按 id 落盘懒下载,别为一个下拉列表批量拉全量图。

@@ -101,3 +101,13 @@ QQ_STAGING_DIR      = _os.path.join(KARAOKE_LIBRARY_DIR, "_qq_staging")    # 下
 QQ_ORIGINAL_QUALITY = ("FLAC", "MP3_320", "MP3_128")   # 原唱音质优先级(取第一个能出明文的)。
 # 默认 **FLAC 无损优先**(~55MB,慢些):原唱既是切换参考、又是 Demucs 分离伴奏的输入源,质量要高;
 # 拿不到无损再退 MP3_320/128。(QQ音乐 无可靠伴奏 stem,伴奏一律由此原唱经 Demucs 分离,见 qqmusic_import。)
+
+# ── 礼物菜单(播放器绿幕左侧竖排"礼物→权益"引导条)──────────────
+# 抖音礼物目录 API:匿名带 aid=1128 即返回 data.gifts[](id/name/diamond_count/icon.url_list)。
+# 礼物列表基本静态:gifts.py 抓一次落盘缓存 + 下载图标 PNG,离线优先,refresh 才重新联网。
+# 托盘"礼物菜单配置"窗据此列图标勾选;选中的 {id,自定义文字} 存 STATE["gifts"](跨重启缓存),
+# 由 _push_gifts 解析成图标绝对路径 + 文字推给播放器绿幕竖排显示(见 server.py / player.py)。
+GIFT_LIST_URL     = "https://live.douyin.com/webcast/gift/list/?aid=1128"
+GIFT_CACHE_DIR    = _os.path.join(BASE_DIR, "gift_cache")
+GIFT_CATALOG_JSON = _os.path.join(GIFT_CACHE_DIR, "gifts_catalog.json")
+GIFT_ICONS_DIR    = _os.path.join(GIFT_CACHE_DIR, "icons")

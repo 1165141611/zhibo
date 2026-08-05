@@ -149,6 +149,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             playerVisible = j.optBoolean("player_visible", old.playerVisible),
             pitchVisible = j.optBoolean("pitch_visible", old.pitchVisible),
             setlistVisible = j.optBoolean("setlist_visible", old.setlistVisible),
+            giftsVisible = j.optBoolean("gifts_visible", old.giftsVisible),
             libCount = j.optInt("lib_count", old.libCount),
         )
         _state.value = ns
@@ -321,6 +322,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     fun togglePlayerWindow() = Unit.also { client.send("cmd" to "player_toggle") }
     fun togglePitch() = Unit.also { client.send("cmd" to "pitch_toggle") }
     fun toggleSetlist() = Unit.also { client.send("cmd" to "setlist_toggle") }
+    fun toggleGifts() = Unit.also { client.send("cmd" to "gifts_toggle") }
 
     override fun onCleared() { client.disconnect() }
 }

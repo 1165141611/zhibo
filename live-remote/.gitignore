@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 *.log
 pc-service/state_cache.json
+# 抖音礼物目录缓存 + 下载的图标 PNG(gifts.py 可再生)
+pc-service/gift_cache/
