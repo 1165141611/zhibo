@@ -239,7 +239,10 @@ STATE = {
     "gifts_visible": True,     # 礼物菜单显隐(播放器 G 键 / 手机遥控,跨重启缓存)
     "gift_x": 24,              # 礼物条左上角 x(播放器鼠标拖动,跨重启缓存)
     "gift_y": 300,             # 礼物条左上角 y(同上)
-    "gift_scale": 1.0,         # 礼物菜单整体缩放 0.6~2.0(配置窗滑块,跨重启缓存)
+    "gift_scale": 1.0,         # 礼物菜单整体缩放 0.4~2.0(配置窗滑块,跨重启缓存)
+    "gift_outline": 1.0,       # 礼物描边宽 0~3px(配置窗滑块,跨重启缓存)
+    "gift_gap": 4,             # 礼物卡片竖直间距 0~24px(配置窗滑块,跨重启缓存)
+    "gift_color": "#333333",   # 礼物描边颜色(配置窗取色器,跨重启缓存)
     "player_x": None, "player_y": None,   # K歌播放器窗口桌面位置(拖动记忆,跨重启缓存)
     "performer": "八门官上",   # 演唱者(主播名):开头标题卡"演唱:<名>";托盘可改,跨重启缓存
     "k_mid": "", "k_title": "", "k_artist": "",
@@ -305,6 +308,9 @@ def _save_persist():
                 "gift_x": int(STATE.get("gift_x", 24)),
                 "gift_y": int(STATE.get("gift_y", 300)),
                 "gift_scale": float(STATE.get("gift_scale", 1.0)),
+                "gift_outline": float(STATE.get("gift_outline", 1.0)),
+                "gift_gap": int(STATE.get("gift_gap", 4)),
+                "gift_color": str(STATE.get("gift_color", "#333333")),
                 "player_x": STATE.get("player_x"),
                 "player_y": STATE.get("player_y"),
                 "performer": STATE.get("performer", "八门官上"),
@@ -380,6 +386,18 @@ def _restore_persist():
             STATE["gift_scale"] = max(0.4, min(2.0, float(data["gift_scale"])))
         except Exception:
             pass
+    if data.get("gift_outline") is not None:
+        try:
+            STATE["gift_outline"] = max(0.0, min(3.0, float(data["gift_outline"])))
+        except Exception:
+            pass
+    if data.get("gift_gap") is not None:
+        try:
+            STATE["gift_gap"] = max(0, min(24, int(data["gift_gap"])))
+        except Exception:
+            pass
+    if isinstance(data.get("gift_color"), str) and data["gift_color"].strip():
+        STATE["gift_color"] = data["gift_color"].strip()
     for _k in ("player_x", "player_y"):          # 播放器窗口位置(拉起播放器后统一下发,见 start_player)
         if data.get(_k) is not None:
             try:
@@ -1305,6 +1323,9 @@ def _player_reader(proc):
                 gx_before = STATE.get("gift_x")
                 gy_before = STATE.get("gift_y")
                 gs_before = STATE.get("gift_scale")
+                go_before = STATE.get("gift_outline")
+                gg_before = STATE.get("gift_gap")
+                gc_before = STATE.get("gift_color")
                 px_before = STATE.get("player_x")
                 py_before = STATE.get("player_y")
                 STATE.update({
@@ -1321,6 +1342,9 @@ def _player_reader(proc):
                     "gift_x": st.get("gift_x", STATE.get("gift_x", 24)),
                     "gift_y": st.get("gift_y", STATE.get("gift_y", 300)),
                     "gift_scale": max(0.4, min(2.0, float(st.get("gift_scale", STATE.get("gift_scale", 1.0))))),
+                    "gift_outline": max(0.0, min(3.0, float(st.get("gift_outline", STATE.get("gift_outline", 1.0))))),
+                    "gift_gap": max(0, min(24, int(st.get("gift_gap", STATE.get("gift_gap", 4))))),
+                    "gift_color": str(st.get("gift_color", STATE.get("gift_color", "#333333"))),
                     # 播放器窗口桌面位置(拖动记忆,跨重启缓存;仅缓存,不推手机——纯 PC 侧信息)
                     "player_x": st.get("win_x", STATE.get("player_x")),
                     "player_y": st.get("win_y", STATE.get("player_y")),
@@ -1335,6 +1359,9 @@ def _player_reader(proc):
                         or STATE.get("gift_x") != gx_before
                         or STATE.get("gift_y") != gy_before
                         or STATE.get("gift_scale") != gs_before
+                        or STATE.get("gift_outline") != go_before
+                        or STATE.get("gift_gap") != gg_before
+                        or STATE.get("gift_color") != gc_before
                         or STATE.get("player_x") != px_before
                         or STATE.get("player_y") != py_before):
                     _save_persist()
@@ -1404,6 +1431,9 @@ def start_player():
         _player_send("gifts_show " + ("1" if STATE.get("gifts_visible", True) else "0"))
         _player_send("gift_pos %d %d" % (int(STATE.get("gift_x", 24)), int(STATE.get("gift_y", 300))))
         _player_send("gift_scale %.3f" % float(STATE.get("gift_scale", 1.0)))
+        _player_send("gift_outline %.2f" % float(STATE.get("gift_outline", 1.0)))
+        _player_send("gift_gap " + str(int(STATE.get("gift_gap", 4))))
+        _player_send("gift_color " + str(STATE.get("gift_color", "#333333")))
         _push_gifts(force=True)
         if STATE.get("player_x") is not None and STATE.get("player_y") is not None:
             _player_send("pos %d %d" % (int(STATE["player_x"]), int(STATE["player_y"])))  # 恢复上次窗口位置
@@ -1639,6 +1669,41 @@ def set_gift_scale(v, save=True):
     if save:
         _save_persist()
         _threadsafe_broadcast()
+
+
+def set_gift_outline(v, save=True):
+    """礼物描边宽(0~3px)。滑块拖动 save=False live 推、松手 save=True 存盘。"""
+    try:
+        w = max(0.0, min(3.0, float(v)))
+    except Exception:
+        return
+    STATE["gift_outline"] = w
+    _player_send("gift_outline %.2f" % w)
+    if save:
+        _save_persist(); _threadsafe_broadcast()
+
+
+def set_gift_gap(v, save=True):
+    """礼物卡片竖直间距(0~24px)。"""
+    try:
+        g = max(0, min(24, int(float(v))))
+    except Exception:
+        return
+    STATE["gift_gap"] = g
+    _player_send("gift_gap " + str(g))
+    if save:
+        _save_persist(); _threadsafe_broadcast()
+
+
+def set_gift_color(hexcol, save=True):
+    """礼物描边颜色(#rrggbb,不透明)。取色器选定即调。"""
+    hexcol = (hexcol or "").strip()
+    if not hexcol:
+        return
+    STATE["gift_color"] = hexcol
+    _player_send("gift_color " + hexcol)
+    if save:
+        _save_persist(); _threadsafe_broadcast()
 
 
 def set_setlist_member(mid, on):
@@ -2878,12 +2943,12 @@ def _open_gift_window(selftest=False):
         global _gift_root
         try:
             import tkinter as tk
-            from tkinter import ttk
+            from tkinter import ttk, colorchooser
             from PIL import Image, ImageTk
 
             root = tk.Tk() if selftest else tk.Toplevel(_ui_root)
             root.title("礼物菜单配置")
-            root.geometry("760x520")
+            root.geometry("720x560")
             _gift_root = root
             if not selftest:
                 def _on_closed():
@@ -3064,23 +3129,66 @@ def _open_gift_window(selftest=False):
                 _deb["id"] = root.after(200, _render_cat)
             q.trace_add("write", _on_query)
 
-            # ── 尺寸调节:滑块 60~200%,拖动 live 推播放器预览、松手存盘(夹在 0.6~2.0)──
-            sbar = tk.Frame(root); sbar.pack(fill="x", padx=10, pady=(2, 0))
-            tk.Label(sbar, text="菜单尺寸:").pack(side="left")
-            sc_lbl = tk.Label(sbar, text="%d%%" % int(round(STATE.get("gift_scale", 1.0) * 100)),
-                              width=5, fg="#111111")
+            # ── 样式调节:尺寸/描边粗细/间距/描边颜色,滑块拖动 live 推播放器预览、松手存盘 ──
+            style = tk.LabelFrame(root, text="样式(实时预览,松手/选定即存)")
+            style.pack(fill="x", padx=10, pady=(2, 0))
+            # 行1:菜单尺寸(整行,滑块拉满)
+            r0 = tk.Frame(style); r0.pack(fill="x", padx=6, pady=(4, 2))
+            tk.Label(r0, text="菜单尺寸", width=8, anchor="w").pack(side="left")
+            sc_lbl = tk.Label(r0, text="%d%%" % int(round(STATE.get("gift_scale", 1.0) * 100)), width=5)
+            sc_lbl.pack(side="right")
 
             def _on_scale(v):
-                pct = int(float(v))
-                sc_lbl.config(text="%d%%" % pct)
-                set_gift_scale(pct / 100.0, save=False)      # live 预览(不存盘)
-            sc = tk.Scale(sbar, from_=40, to=200, orient="horizontal", resolution=5,
+                pct = int(float(v)); sc_lbl.config(text="%d%%" % pct)
+                set_gift_scale(pct / 100.0, save=False)
+            sc = tk.Scale(r0, from_=40, to=200, orient="horizontal", resolution=5,
                           showvalue=False, command=_on_scale)
             sc.set(int(round(STATE.get("gift_scale", 1.0) * 100)))
             sc.pack(side="left", fill="x", expand=True, padx=6)
-            sc.bind("<ButtonRelease-1>",
-                    lambda e: set_gift_scale(sc.get() / 100.0, save=True))  # 松手存盘
-            sc_lbl.pack(side="left")
+            sc.bind("<ButtonRelease-1>", lambda e: set_gift_scale(sc.get() / 100.0, save=True))
+            # 行2:描边粗细 | 菜单间距 | 描边颜色(三组并排,吃满横向)
+            r1 = tk.Frame(style); r1.pack(fill="x", padx=6, pady=(0, 5))
+            of = tk.Frame(r1); of.pack(side="left", fill="x", expand=True)
+            tk.Label(of, text="描边粗细", width=8, anchor="w").pack(side="left")
+            ol_lbl = tk.Label(of, text="%.1f" % float(STATE.get("gift_outline", 1.0)), width=4)
+            ol_lbl.pack(side="right")
+
+            def _on_outline(v):
+                w = float(v); ol_lbl.config(text="%.1f" % w)
+                set_gift_outline(w, save=False)
+            osc = tk.Scale(of, from_=0.0, to=3.0, orient="horizontal", resolution=0.1,
+                           showvalue=False, command=_on_outline)
+            osc.set(float(STATE.get("gift_outline", 1.0)))
+            osc.pack(side="left", fill="x", expand=True, padx=4)
+            osc.bind("<ButtonRelease-1>", lambda e: set_gift_outline(osc.get(), save=True))
+
+            gf = tk.Frame(r1); gf.pack(side="left", fill="x", expand=True, padx=(14, 0))
+            tk.Label(gf, text="菜单间距", width=8, anchor="w").pack(side="left")
+            gp_lbl = tk.Label(gf, text=str(int(STATE.get("gift_gap", 4))), width=3)
+            gp_lbl.pack(side="right")
+
+            def _on_gap(v):
+                g = int(float(v)); gp_lbl.config(text=str(g))
+                set_gift_gap(g, save=False)
+            gsc = tk.Scale(gf, from_=0, to=24, orient="horizontal", resolution=1,
+                           showvalue=False, command=_on_gap)
+            gsc.set(int(STATE.get("gift_gap", 4)))
+            gsc.pack(side="left", fill="x", expand=True, padx=4)
+            gsc.bind("<ButtonRelease-1>", lambda e: set_gift_gap(gsc.get(), save=True))
+
+            cf = tk.Frame(r1); cf.pack(side="left", padx=(14, 0))
+            tk.Label(cf, text="描边颜色").pack(side="left")
+            cur_col = {"v": str(STATE.get("gift_color", "#333333"))}
+            sw = tk.Label(cf, width=3, bg=cur_col["v"], relief="solid", bd=1)
+            sw.pack(side="left", padx=4)
+
+            def _pick_color():
+                res = colorchooser.askcolor(color=cur_col["v"], parent=root, title="描边颜色")
+                if res and res[1]:
+                    cur_col["v"] = res[1]
+                    sw.config(bg=res[1])
+                    set_gift_color(res[1], save=True)
+            tk.Button(cf, text="选色", command=_pick_color).pack(side="left")
 
             # ── 底部:提示 + 保存/关闭 ──
             bar = tk.Frame(root); bar.pack(fill="x", padx=10, pady=(0, 10))

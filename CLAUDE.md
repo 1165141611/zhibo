@@ -100,9 +100,9 @@
   与 `qqmusic_import.py`。去重复用 `library.manifest()`;凭据/暂存在 `config.QQ_CRED_PATH/QQ_STAGING_DIR`。
   **礼物菜单(2026-08-05)**:绿幕左侧竖排"礼物→权益"引导条(抖音礼物图标 + 自定义文字,如 🎈点歌/🍰插队)。
   `gifts.py` 抓抖音 `webcast/gift/list?aid=1128`(匿名可取)→ 缓存目录 + 按需下图标(`config.GIFT_*`);托盘
-  「礼物菜单配置」窗选礼物+填文字+排序+**尺寸滑块 40~200%**,`set_gift_config`→`_push_gifts`(去重)经 IPC
-  `gifts` 推播放器;显隐 `gifts_toggle`/G 键、鼠标拖动摆位、`gift_scale` 缩放,
-  `STATE["gifts"]/gifts_visible/gift_x/gift_y/gift_scale` 存 `state_cache.json`。详见 DEV_LOG.md 第二十节。
+  「礼物菜单配置」窗选礼物+填文字+排序+**「样式」面板(尺寸 40~200% / 描边粗细 0~3px / 间距 0~24px / 描边颜色
+  取色器)**,`set_gift_config`→`_push_gifts`(去重)经 IPC `gifts` 推播放器;显隐 `gifts_toggle`/G 键、鼠标拖动摆位、
+  `gift_scale/gift_outline/gift_gap/gift_color` 样式;上述全部经 STATE 回读存 `state_cache.json`。详见 DEV_LOG.md 第二十节。
 - **LiveRemote**:安卓原生 App(Compose,演唱/队列/遥控三页签),遥控页含声卡场景 + 窗口开关
   (Studio One / K歌歌词 / 音准线显隐);**QQ音乐 已从遥控页单列控制区移除,改由常驻悬浮球(现含遥控页,
   三页签通吃)统一承载**;点歌抽屉支持搜索 + 触底分页;**演唱页音准块高亮对齐 PC(2026-07-15):
@@ -130,10 +130,11 @@
   (识别 `<?xml`/`<QrcInfos`/`LyricContent=` 直接返回)——QQ音乐 歌词经 API 已解密成明文,直接落盘 `.qrc`
   即可读;QQ音乐 歌无音高,写**空 `.note`**(`load_notes` 返回空→不显音准线)。导入编排在 pc-service 侧。
   **礼物菜单(2026-08-05;08-06 去底板)**:绿幕左侧竖排礼物引导条,`G` 键显隐、鼠标单独拖动(命中检测 vs
-  拖整窗)、尺寸可调。每个礼物预合成卡片(图标+自定义文字),**无底板,各自描一圈黑边**(取内容剪影填黑、
+  拖整窗)、尺寸/描边粗细/间距/描边颜色可调(配置窗)。每个礼物预合成卡片(图标+自定义文字),**无底板,各自描一圈边**(取内容剪影填描边色、
   8 向偏移画一圈,等价歌词黑 keyline;彩色半透明礼物 PNG/白字裸贴绿会留绿边,emoji 走剪影也能描边),
-  `_build_gift_pix` 缓存、`paintEvent` 只 blit;内容/显隐/位置/尺寸经 IPC(`gifts`/`gifts_show`/`gift_pos`/
-  `gift_scale`)+ STATE 回读缓存。配置窗(含尺寸滑块 40~200%)在 pc-service 侧。
+  描边色**不透明**(opaque 绿幕干净,淡化靠选浅灰);`_build_gift_pix` 缓存、`paintEvent` 只 blit;内容/显隐/位置/
+  样式经 IPC(`gifts`/`gifts_show`/`gift_pos`/`gift_scale`/`gift_outline`/`gift_gap`/`gift_color`)+ STATE 回读缓存。
+  配置窗(选礼物 + 「样式」面板)在 pc-service 侧。
   **做 K歌 大功能前先读根 [KARAOKE_SYSTEM.md](KARAOKE_SYSTEM.md)。**
 
 > 更细的历史与踩坑记录在各子项目 README 及 `live-remote/DEV_LOG.md`。

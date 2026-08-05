@@ -171,13 +171,15 @@ pc-service 把播放器 IPC 接进 WebSocket,并加曲库列表/点歌队列(供
   🎈点歌 / 🍰插队),引导观众打赏。链路三段:①**目录抓取** `gifts.py` 抓抖音 `webcast/gift/list?aid=1128`
   (匿名可取,`data.gifts[]` 含 id/name/diamond_count/icon)→ 缓存 `gift_cache/gifts_catalog.json` + 按需下图标
   PNG 到 `gift_cache/icons/`,离线优先。②**配置窗**:托盘「礼物菜单配置」(单实例,`_gift_root`)——左目录搜索
-  勾选(点「＋加入」)、右已选可**填自定义文字 + ↑↓排序 + ✕删**、底部**尺寸滑块 40~200%**(拖动 live 推播放器
-  预览、松手存盘,`set_gift_scale` 夹 0.4~2.0);保存 `set_gift_config([{id,text}])` → 存
+  勾选(点「＋加入」)、右已选可**填自定义文字 + ↑↓排序 + ✕删**、底部「样式」面板**尺寸 40~200% / 描边粗细
+  0~3px / 间距 0~24px / 描边颜色(取色器,不透明)**(滑块拖动 live 推播放器预览、松手/选定即存,`set_gift_scale/
+  set_gift_outline/set_gift_gap/set_gift_color`);保存 `set_gift_config([{id,text}])` → 存
   `STATE["gifts"]` + `_push_gifts`(去重,同 `_push_setlist`)把 `gifts.resolve` 出的 `[{icon:绝对路径,text}]`
   经 `gifts <json>` 推播放器。③**显隐/位置/尺寸**:WS `{"cmd":"gifts_toggle"}` 翻 `STATE["gifts_visible"]` 发
-  `gifts_show 0/1`;播放器 `G` 键显隐、**鼠标单独拖动**礼物条(命中检测)、`gift_scale` 缩放;`gifts_show/gift_x/
-  gift_y/gift_scale` 经 STATE 回读缓存;拉起播放器时统一重推。手机遥控页"窗口开关"区加"礼物菜单 显示/隐藏"、
-  托盘加"礼物菜单显示"勾选项。**绿幕:礼物图/文字各自描一圈黑边(剪影法),不用底板**(彩色半透明 PNG/白字裸贴绿
-  会留绿边,见 karaoke-player README「关键技术决策」;初版用不透明底板,08-06 改剪影描边去黑底)。
+  `gifts_show 0/1`;播放器 `G` 键显隐、**鼠标单独拖动**礼物条(命中检测)、样式 `gift_scale/gift_outline/gift_gap/
+  gift_color`;`gifts_show/gift_x/gift_y/gift_scale/gift_outline/gift_gap/gift_color` 经 STATE 回读缓存;拉起播放器
+  时统一重推。手机遥控页"窗口开关"区加"礼物菜单 显示/隐藏"、托盘加"礼物菜单显示"勾选项。**绿幕:礼物图/文字各自
+  描一圈边(剪影法,描边色不透明可选),不用底板**(彩色半透明 PNG/白字裸贴绿会留绿边,见 karaoke-player README
+  「关键技术决策」;初版用不透明底板,08-06 改剪影描边去黑底 + 描边宽/颜色/间距做成配置窗可调)。
 - **伴奏音量走感知曲线**:手机媒体音量%→伴奏增益用**平方曲线**(增益=（%/100)²,见 karaoke-player
   `audio_engine._gain_for`),低档位真正变小(最小档由线性 -23dB 降到 -46dB)、控制更细。

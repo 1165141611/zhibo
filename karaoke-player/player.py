@@ -100,7 +100,10 @@ class KaraokeWindow(QtWidgets.QWidget):
         self.gift_x = 24                            # 礼物条左上角 x(鼠标拖动;缓存)
         self.gift_y = 300                           # 左上角 y(默认左侧偏上,避开顶端歌单带)
         self.gift_scale = 1.0                       # 礼物菜单整体缩放(配置窗滑块调,IPC gift_scale;缓存)
-        self._gift_pix = None                       # 预合成卡片 pixmap 缓存(内容/字体/DPR/尺寸 变时重建)
+        self.gift_outline = self.GIFT_OUTLINE_DEF   # 描边宽(配置窗滑块;IPC gift_outline;缓存)
+        self.gift_gap = self.GIFT_GAP_DEF           # 卡片竖直间距(配置窗滑块;IPC gift_gap;缓存)
+        self.gift_color = QtGui.QColor(self.GIFT_COLOR_DEF)  # 描边颜色(配置窗取色器;IPC gift_color;缓存)
+        self._gift_pix = None                       # 预合成卡片 pixmap 缓存(内容/字体/DPR/尺寸/描边 变时重建)
         self._gift_drag = False                     # 是否正在拖礼物条(vs 拖整窗)
         self._gift_drag_off = (0, 0)                # 拖动时鼠标相对礼物条左上角的偏移
         self.blank = False                          # 空白态:只画全绿背景(隐藏歌词时用,捕获帧=纯绿)
@@ -334,7 +337,7 @@ class KaraokeWindow(QtWidgets.QWidget):
         icon = max(1, int(round(self.GIFT_ICON * s)))
         gap = int(round(self.GIFT_ICON_GAP * s))
         pt = max(6, int(round(self.GIFT_TEXT_PT * s)))
-        r = max(1.0, self.GIFT_OUTLINE * s)                # 描边宽(细,float)
+        r = max(0.0, min(self.GIFT_OUTLINE_MAX, self.gift_outline) * s)   # 描边宽(可调,0=不描)
         pad = int(math.ceil(r)) + 2                        # 四周留描边出血
         tf = QtGui.QFont(self.font_big.family(), pt)
         tf.setBold(True)
@@ -370,31 +373,25 @@ class KaraokeWindow(QtWidgets.QWidget):
                 cp.drawText(QtCore.QRectF(pad + icon + gap, pad, max_tw + 2, content_h),
                             int(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft), txt)
             cp.end()
-            # 2) 黑剪影:取内容层 alpha 填黑(SourceIn)
-            sil = QtGui.QPixmap(content.size())
-            sil.setDevicePixelRatio(dpr)
-            sil.fill(QtCore.Qt.transparent)
-            sp = QtGui.QPainter(sil)
-            sp.drawPixmap(0, 0, content)
-            sp.setCompositionMode(QtGui.QPainter.CompositionMode_SourceIn)
-            sp.fillRect(sil.rect(), QtGui.QColor(0, 0, 0))
-            sp.end()
-            # 3) 描边环:黑剪影在 8 方向各偏移 r 画到一张环层(全不透明,叠加处不更黑)
-            ring = QtGui.QPixmap(content.size())
-            ring.setDevicePixelRatio(dpr)
-            ring.fill(QtCore.Qt.transparent)
-            rp = QtGui.QPainter(ring)
-            for ox, oy in self._GIFT_OUTLINE_OFFS:
-                rp.drawPixmap(QtCore.QPointF(ox * r, oy * r), sil)
-            rp.end()
-            # 4) 合成:环层**一次性降透明度**画上(=淡描边,均匀不叠深)+ 内容层盖上
+            # 2) 描边剪影:取内容层 alpha 填成**描边色**(opaque=绿幕干净;淡靠选浅灰,不用半透明)
+            sil = None
+            if r > 0:
+                sil = QtGui.QPixmap(content.size())
+                sil.setDevicePixelRatio(dpr)
+                sil.fill(QtCore.Qt.transparent)
+                sp = QtGui.QPainter(sil)
+                sp.drawPixmap(0, 0, content)
+                sp.setCompositionMode(QtGui.QPainter.CompositionMode_SourceIn)
+                sp.fillRect(sil.rect(), self.gift_color)
+                sp.end()
+            # 3) 合成:描边剪影 8 方向各偏移 r 画一圈(r>0 才描)+ 内容层盖上
             pm = QtGui.QPixmap(content.size())
             pm.setDevicePixelRatio(dpr)
             pm.fill(QtCore.Qt.transparent)
             p = QtGui.QPainter(pm)
-            p.setOpacity(self.GIFT_OUTLINE_ALPHA)
-            p.drawPixmap(QtCore.QPointF(0, 0), ring)
-            p.setOpacity(1.0)
+            if sil is not None:
+                for ox, oy in self._GIFT_OUTLINE_OFFS:
+                    p.drawPixmap(QtCore.QPointF(ox * r, oy * r), sil)
             p.drawPixmap(QtCore.QPointF(0, 0), content)
             p.end()
             self._gift_pix.append((pm, card_w, card_h))
@@ -403,7 +400,7 @@ class KaraokeWindow(QtWidgets.QWidget):
         """从 (gift_x, gift_y) 竖排 blit 各礼物卡片。pixmap 预合成(见 _build_gift_pix),此处零重活。"""
         if self._gift_pix is None:
             self._build_gift_pix()
-        gv = self.GIFT_GAP * max(self.GIFT_SCALE_MIN, min(self.GIFT_SCALE_MAX, self.gift_scale))
+        gv = max(0, min(self.GIFT_GAP_MAX, self.gift_gap))   # 间距绝对 px(不随尺寸缩放,直控更直观)
         y = self.gift_y
         for pm, cw, ch in self._gift_pix:
             p.drawPixmap(QtCore.QPointF(self.gift_x, y), pm)
@@ -418,7 +415,8 @@ class KaraokeWindow(QtWidgets.QWidget):
         if not self._gift_pix:
             return None
         bw = max(cw for _, cw, _ in self._gift_pix)
-        bh = sum(ch for _, _, ch in self._gift_pix) + self.GIFT_GAP * (len(self._gift_pix) - 1)
+        gv = max(0, min(self.GIFT_GAP_MAX, self.gift_gap))
+        bh = sum(ch for _, _, ch in self._gift_pix) + gv * (len(self._gift_pix) - 1)
         return QtCore.QRectF(self.gift_x, self.gift_y, bw, bh)
 
     def _tick_paint(self):
@@ -726,23 +724,23 @@ class KaraokeWindow(QtWidgets.QWidget):
     TITLE_FADE_IN = 400
     TITLE_FADE_OUT = 1200
     # ── 礼物菜单(绿幕左侧竖排"礼物→权益"引导条)──────────────────────
-    # 每张卡片 = 礼物图标(左) + 自定义文字(右,白),**无底板**——各自描一圈黑边(贴纸式轮廓)。
-    # **必须描黑边**:礼物图/文字直接贴绿会被抠像留绿边(半透明边与绿混合);描边法把内容的
-    # 剪影(alpha)填黑、在 8 个方向偏移各画一遍,再把内容盖上——等价歌词的黑 keyline:抗锯齿边缘
-    # 落黑上、绿幕干净抠。emoji 也走剪影(不受"字形路径不出彩色"限制),彩色 emoji + 黑边一体。
+    # 每张卡片 = 礼物图标(左) + 自定义文字(右,白),**无底板**——各自描一圈边(贴纸式轮廓)。
+    # **必须描边**:礼物图/文字直接贴绿会被抠像留绿边(半透明边与绿混合);描边法把内容的
+    # 剪影(alpha)填成描边色、在 8 个方向偏移各画一遍,再把内容盖上——等价歌词的黑 keyline:
+    # 抗锯齿边缘落描边色上、绿幕干净抠。emoji 也走剪影(不受"字形路径不出彩色"限制)。
+    # **描边宽/间距/颜色 现为可调实例属性**(配置窗滑块+取色器控;IPC gift_outline/gift_gap/gift_color),
+    # 下面只是默认值与上限。描边色用**不透明**深灰:opaque=绿幕干净不留暗绿边,淡化靠选浅灰而非半透明。
     GIFT_ICON = 48          # 图标显示边长(px,base;实际乘 gift_scale)
     GIFT_ICON_GAP = 8       # 图标与文字间距(base)
-    GIFT_GAP = 4            # 卡片竖直间距(base;行距缩小一半)
     GIFT_TEXT_PT = 16       # 自定义文字字号(base)
-    # 黑描边:剪影外扩 r(全部外露)。细 + 淡——`GIFT_OUTLINE` 控宽(1.5px,比歌单更细),
-    # `GIFT_OUTLINE_ALPHA` 控淡(整圈描边一次性降透明度,避免 8 向偏移叠加处更黑)。
-    # 注:淡化成半透明后,那圈边在纯绿上是"暗绿",抠像可能留一丝淡边(纯黑不透明最干净);
-    # 若真留淡边,改回不透明的深灰(green-safe 又不刺眼):把 ALPHA 调回 1.0、COL 用深灰即可。
-    GIFT_OUTLINE = 1.0       # 描边宽(base;1px 细描边)
-    GIFT_OUTLINE_ALPHA = 0.6 # 描边不透明度(淡化;1.0=纯黑最干净)
+    GIFT_GAP_DEF = 4        # 卡片竖直间距默认(px,绝对;配置窗滑块可调)
+    GIFT_GAP_MAX = 24
+    GIFT_OUTLINE_DEF = 1.0  # 描边宽默认(px,剪影外扩;0=不描边)
+    GIFT_OUTLINE_MAX = 3.0
+    GIFT_COLOR_DEF = "#333333"   # 描边颜色默认(深灰;opaque 绿幕干净,淡化选浅灰)
     GIFT_SCALE_MIN = 0.4    # 尺寸下限(配置窗滑块 40%;可缩得更小)
     GIFT_SCALE_MAX = 2.0    # 尺寸上限(配置窗滑块 200%)
-    # 黑描边的 8 个偏移方向(×描边宽 r):内容剪影填黑在各方向画一遍 = 一圈轮廓
+    # 描边的 8 个偏移方向(×描边宽 r):内容剪影填色在各方向画一遍 = 一圈轮廓
     _GIFT_OUTLINE_OFFS = ((-1, -1), (0, -1), (1, -1), (-1, 0),
                           (1, 0), (-1, 1), (0, 1), (1, 1))
 
@@ -1019,6 +1017,8 @@ class KaraokeWindow(QtWidgets.QWidget):
                   "gifts_show": self.show_gifts,
                   "gift_x": int(self.gift_x), "gift_y": int(self.gift_y),
                   "gift_scale": round(self.gift_scale, 3),
+                  "gift_outline": round(self.gift_outline, 2),
+                  "gift_gap": int(self.gift_gap), "gift_color": self.gift_color.name(),
                   "mid": self.song.mid, "title": self.song.title,
                   "artist": self.song.artist}
             if self._saved_pos is not None:   # 有真实位置(显示过 / pc-service 已下发)才上报,免把 (0,0) 缓存进去
@@ -1232,6 +1232,24 @@ def main():
                         win._gift_pix = None        # 尺寸变了重建卡片
                 except ValueError:
                     pass
+            elif c == "gift_outline" and arg is not None:
+                try:
+                    v = max(0.0, min(win.GIFT_OUTLINE_MAX, float(arg)))
+                    if v != win.gift_outline:
+                        win.gift_outline = v
+                        win._gift_pix = None        # 描边宽变了重建卡片
+                except ValueError:
+                    pass
+            elif c == "gift_gap" and arg is not None:
+                try:
+                    win.gift_gap = max(0, min(win.GIFT_GAP_MAX, int(float(arg))))
+                except ValueError:
+                    pass                            # 间距只影响竖排,不重建 pixmap
+            elif c == "gift_color" and arg is not None:
+                col = QtGui.QColor(arg.strip())
+                if col.isValid() and col.name() != win.gift_color.name():
+                    win.gift_color = col
+                    win._gift_pix = None            # 描边色变了重建卡片
             # 窗口桌面位置(pc-service 据 state_cache.json 在拉起时下发,恢复上次关闭时的位置)
             elif c == "pos" and arg is not None:
                 try:
