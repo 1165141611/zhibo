@@ -19,6 +19,7 @@ PC 播伴奏、自己当时钟 → 逐字高亮滚动歌词 + 原唱音高提示
 import sys
 import os
 import json
+import math
 import time
 import threading
 
@@ -333,8 +334,8 @@ class KaraokeWindow(QtWidgets.QWidget):
         icon = max(1, int(round(self.GIFT_ICON * s)))
         gap = int(round(self.GIFT_ICON_GAP * s))
         pt = max(6, int(round(self.GIFT_TEXT_PT * s)))
-        r = max(2, int(round(self.GIFT_OUTLINE * s)))     # 黑描边宽
-        pad = r + 2                                        # 四周留描边出血
+        r = max(1.0, self.GIFT_OUTLINE * s)                # 描边宽(细,float)
+        pad = int(math.ceil(r)) + 2                        # 四周留描边出血
         tf = QtGui.QFont(self.font_big.family(), pt)
         tf.setBold(True)
         fm = QtGui.QFontMetrics(tf)
@@ -378,13 +379,22 @@ class KaraokeWindow(QtWidgets.QWidget):
             sp.setCompositionMode(QtGui.QPainter.CompositionMode_SourceIn)
             sp.fillRect(sil.rect(), QtGui.QColor(0, 0, 0))
             sp.end()
-            # 3) 合成:黑剪影在 8 方向各偏移 r 画一圈(=黑轮廓)+ 内容层盖上
+            # 3) 描边环:黑剪影在 8 方向各偏移 r 画到一张环层(全不透明,叠加处不更黑)
+            ring = QtGui.QPixmap(content.size())
+            ring.setDevicePixelRatio(dpr)
+            ring.fill(QtCore.Qt.transparent)
+            rp = QtGui.QPainter(ring)
+            for ox, oy in self._GIFT_OUTLINE_OFFS:
+                rp.drawPixmap(QtCore.QPointF(ox * r, oy * r), sil)
+            rp.end()
+            # 4) 合成:环层**一次性降透明度**画上(=淡描边,均匀不叠深)+ 内容层盖上
             pm = QtGui.QPixmap(content.size())
             pm.setDevicePixelRatio(dpr)
             pm.fill(QtCore.Qt.transparent)
             p = QtGui.QPainter(pm)
-            for ox, oy in self._GIFT_OUTLINE_OFFS:
-                p.drawPixmap(QtCore.QPointF(ox * r, oy * r), sil)
+            p.setOpacity(self.GIFT_OUTLINE_ALPHA)
+            p.drawPixmap(QtCore.QPointF(0, 0), ring)
+            p.setOpacity(1.0)
             p.drawPixmap(QtCore.QPointF(0, 0), content)
             p.end()
             self._gift_pix.append((pm, card_w, card_h))
@@ -724,9 +734,12 @@ class KaraokeWindow(QtWidgets.QWidget):
     GIFT_ICON_GAP = 8       # 图标与文字间距(base)
     GIFT_GAP = 9            # 卡片竖直间距(base)
     GIFT_TEXT_PT = 16       # 自定义文字字号(base)
-    # 黑描边宽:剪影外扩 r(全部外露)。对齐歌单描边视觉粗细——歌单用居中笔画
-    # OW_BLACK(6)×font_small/font_big=4(外露约 2px),故这里取 r=2 与之相当(别更粗)。
-    GIFT_OUTLINE = 2        # 黑描边/keyline 宽(base;绿幕干净抠,粗细看齐歌单)
+    # 黑描边:剪影外扩 r(全部外露)。细 + 淡——`GIFT_OUTLINE` 控宽(1.5px,比歌单更细),
+    # `GIFT_OUTLINE_ALPHA` 控淡(整圈描边一次性降透明度,避免 8 向偏移叠加处更黑)。
+    # 注:淡化成半透明后,那圈边在纯绿上是"暗绿",抠像可能留一丝淡边(纯黑不透明最干净);
+    # 若真留淡边,改回不透明的深灰(green-safe 又不刺眼):把 ALPHA 调回 1.0、COL 用深灰即可。
+    GIFT_OUTLINE = 1.5       # 描边宽(base;比歌单再细一点)
+    GIFT_OUTLINE_ALPHA = 0.6 # 描边不透明度(淡化;1.0=纯黑最干净)
     GIFT_SCALE_MIN = 0.4    # 尺寸下限(配置窗滑块 40%;可缩得更小)
     GIFT_SCALE_MAX = 2.0    # 尺寸上限(配置窗滑块 200%)
     # 黑描边的 8 个偏移方向(×描边宽 r):内容剪影填黑在各方向画一遍 = 一圈轮廓
