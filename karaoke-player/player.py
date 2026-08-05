@@ -732,13 +732,13 @@ class KaraokeWindow(QtWidgets.QWidget):
     # 落黑上、绿幕干净抠。emoji 也走剪影(不受"字形路径不出彩色"限制),彩色 emoji + 黑边一体。
     GIFT_ICON = 48          # 图标显示边长(px,base;实际乘 gift_scale)
     GIFT_ICON_GAP = 8       # 图标与文字间距(base)
-    GIFT_GAP = 9            # 卡片竖直间距(base)
+    GIFT_GAP = 4            # 卡片竖直间距(base;行距缩小一半)
     GIFT_TEXT_PT = 16       # 自定义文字字号(base)
     # 黑描边:剪影外扩 r(全部外露)。细 + 淡——`GIFT_OUTLINE` 控宽(1.5px,比歌单更细),
     # `GIFT_OUTLINE_ALPHA` 控淡(整圈描边一次性降透明度,避免 8 向偏移叠加处更黑)。
     # 注:淡化成半透明后,那圈边在纯绿上是"暗绿",抠像可能留一丝淡边(纯黑不透明最干净);
     # 若真留淡边,改回不透明的深灰(green-safe 又不刺眼):把 ALPHA 调回 1.0、COL 用深灰即可。
-    GIFT_OUTLINE = 1.5       # 描边宽(base;比歌单再细一点)
+    GIFT_OUTLINE = 1.0       # 描边宽(base;1px 细描边)
     GIFT_OUTLINE_ALPHA = 0.6 # 描边不透明度(淡化;1.0=纯黑最干净)
     GIFT_SCALE_MIN = 0.4    # 尺寸下限(配置窗滑块 40%;可缩得更小)
     GIFT_SCALE_MAX = 2.0    # 尺寸上限(配置窗滑块 200%)
