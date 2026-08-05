@@ -239,6 +239,7 @@ STATE = {
     "gifts_visible": True,     # 礼物菜单显隐(播放器 G 键 / 手机遥控,跨重启缓存)
     "gift_x": 24,              # 礼物条左上角 x(播放器鼠标拖动,跨重启缓存)
     "gift_y": 300,             # 礼物条左上角 y(同上)
+    "gift_scale": 1.0,         # 礼物菜单整体缩放 0.6~2.0(配置窗滑块,跨重启缓存)
     "player_x": None, "player_y": None,   # K歌播放器窗口桌面位置(拖动记忆,跨重启缓存)
     "performer": "八门官上",   # 演唱者(主播名):开头标题卡"演唱:<名>";托盘可改,跨重启缓存
     "k_mid": "", "k_title": "", "k_artist": "",
@@ -303,6 +304,7 @@ def _save_persist():
                 "gifts_visible": bool(STATE.get("gifts_visible", True)),
                 "gift_x": int(STATE.get("gift_x", 24)),
                 "gift_y": int(STATE.get("gift_y", 300)),
+                "gift_scale": float(STATE.get("gift_scale", 1.0)),
                 "player_x": STATE.get("player_x"),
                 "player_y": STATE.get("player_y"),
                 "performer": STATE.get("performer", "八门官上"),
@@ -373,6 +375,11 @@ def _restore_persist():
                 STATE[_k] = int(data[_k])
             except Exception:
                 pass
+    if data.get("gift_scale") is not None:
+        try:
+            STATE["gift_scale"] = max(0.6, min(2.0, float(data["gift_scale"])))
+        except Exception:
+            pass
     for _k in ("player_x", "player_y"):          # 播放器窗口位置(拉起播放器后统一下发,见 start_player)
         if data.get(_k) is not None:
             try:
@@ -1297,6 +1304,7 @@ def _player_reader(proc):
                 gv_before = STATE.get("gifts_visible")
                 gx_before = STATE.get("gift_x")
                 gy_before = STATE.get("gift_y")
+                gs_before = STATE.get("gift_scale")
                 px_before = STATE.get("player_x")
                 py_before = STATE.get("player_y")
                 STATE.update({
@@ -1312,6 +1320,7 @@ def _player_reader(proc):
                     "gifts_visible": st.get("gifts_show", STATE.get("gifts_visible", True)),
                     "gift_x": st.get("gift_x", STATE.get("gift_x", 24)),
                     "gift_y": st.get("gift_y", STATE.get("gift_y", 300)),
+                    "gift_scale": st.get("gift_scale", STATE.get("gift_scale", 1.0)),
                     # 播放器窗口桌面位置(拖动记忆,跨重启缓存;仅缓存,不推手机——纯 PC 侧信息)
                     "player_x": st.get("win_x", STATE.get("player_x")),
                     "player_y": st.get("win_y", STATE.get("player_y")),
@@ -1325,6 +1334,7 @@ def _player_reader(proc):
                         or STATE.get("gifts_visible") != gv_before
                         or STATE.get("gift_x") != gx_before
                         or STATE.get("gift_y") != gy_before
+                        or STATE.get("gift_scale") != gs_before
                         or STATE.get("player_x") != px_before
                         or STATE.get("player_y") != py_before):
                     _save_persist()
@@ -1393,6 +1403,7 @@ def start_player():
         # 礼物菜单:显隐 + 位置 + 内容(拉起必推,绕过去重缓存)
         _player_send("gifts_show " + ("1" if STATE.get("gifts_visible", True) else "0"))
         _player_send("gift_pos %d %d" % (int(STATE.get("gift_x", 24)), int(STATE.get("gift_y", 300))))
+        _player_send("gift_scale %.3f" % float(STATE.get("gift_scale", 1.0)))
         _push_gifts(force=True)
         if STATE.get("player_x") is not None and STATE.get("player_y") is not None:
             _player_send("pos %d %d" % (int(STATE["player_x"]), int(STATE["player_y"])))  # 恢复上次窗口位置
@@ -1614,6 +1625,20 @@ def set_gift_config(items):
     _save_persist()
     _push_gifts(force=True)          # 内容确实变了,强推
     _threadsafe_broadcast()
+
+
+def set_gift_scale(v, save=True):
+    """礼物菜单尺寸(0.6~2.0)。配置窗滑块调:拖动时 save=False 只 live 推播放器(preview),
+    松手 save=True 存盘 + 广播。夹在上下限内。"""
+    try:
+        s = max(0.6, min(2.0, float(v)))
+    except Exception:
+        return
+    STATE["gift_scale"] = s
+    _player_send("gift_scale %.3f" % s)
+    if save:
+        _save_persist()
+        _threadsafe_broadcast()
 
 
 def set_setlist_member(mid, on):
@@ -3038,6 +3063,24 @@ def _open_gift_window(selftest=False):
                         pass
                 _deb["id"] = root.after(200, _render_cat)
             q.trace_add("write", _on_query)
+
+            # ── 尺寸调节:滑块 60~200%,拖动 live 推播放器预览、松手存盘(夹在 0.6~2.0)──
+            sbar = tk.Frame(root); sbar.pack(fill="x", padx=10, pady=(2, 0))
+            tk.Label(sbar, text="菜单尺寸:").pack(side="left")
+            sc_lbl = tk.Label(sbar, text="%d%%" % int(round(STATE.get("gift_scale", 1.0) * 100)),
+                              width=5, fg="#111111")
+
+            def _on_scale(v):
+                pct = int(float(v))
+                sc_lbl.config(text="%d%%" % pct)
+                set_gift_scale(pct / 100.0, save=False)      # live 预览(不存盘)
+            sc = tk.Scale(sbar, from_=60, to=200, orient="horizontal", resolution=5,
+                          showvalue=False, command=_on_scale)
+            sc.set(int(round(STATE.get("gift_scale", 1.0) * 100)))
+            sc.pack(side="left", fill="x", expand=True, padx=6)
+            sc.bind("<ButtonRelease-1>",
+                    lambda e: set_gift_scale(sc.get() / 100.0, save=True))  # 松手存盘
+            sc_lbl.pack(side="left")
 
             # ── 底部:提示 + 保存/关闭 ──
             bar = tk.Frame(root); bar.pack(fill="x", padx=10, pady=(0, 10))
