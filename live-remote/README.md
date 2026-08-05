@@ -171,8 +171,8 @@ pc-service 把播放器 IPC 接进 WebSocket,并加曲库列表/点歌队列(供
   🎈点歌 / 🍰插队),引导观众打赏。链路三段:①**目录抓取** `gifts.py` 抓抖音 `webcast/gift/list?aid=1128`
   (匿名可取,`data.gifts[]` 含 id/name/diamond_count/icon)→ 缓存 `gift_cache/gifts_catalog.json` + 按需下图标
   PNG 到 `gift_cache/icons/`,离线优先。②**配置窗**:托盘「礼物菜单配置」(单实例,`_gift_root`)——左目录搜索
-  勾选(点「＋加入」)、右已选可**填自定义文字 + ↑↓排序 + ✕删**、底部**尺寸滑块 60~200%**(拖动 live 推播放器
-  预览、松手存盘,`set_gift_scale` 夹 0.6~2.0);保存 `set_gift_config([{id,text}])` → 存
+  勾选(点「＋加入」)、右已选可**填自定义文字 + ↑↓排序 + ✕删**、底部**尺寸滑块 40~200%**(拖动 live 推播放器
+  预览、松手存盘,`set_gift_scale` 夹 0.4~2.0);保存 `set_gift_config([{id,text}])` → 存
   `STATE["gifts"]` + `_push_gifts`(去重,同 `_push_setlist`)把 `gifts.resolve` 出的 `[{icon:绝对路径,text}]`
   经 `gifts <json>` 推播放器。③**显隐/位置/尺寸**:WS `{"cmd":"gifts_toggle"}` 翻 `STATE["gifts_visible"]` 发
   `gifts_show 0/1`;播放器 `G` 键显隐、**鼠标单独拖动**礼物条(命中检测)、`gift_scale` 缩放;`gifts_show/gift_x/

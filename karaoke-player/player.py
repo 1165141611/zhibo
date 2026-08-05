@@ -720,12 +720,14 @@ class KaraokeWindow(QtWidgets.QWidget):
     # **必须描黑边**:礼物图/文字直接贴绿会被抠像留绿边(半透明边与绿混合);描边法把内容的
     # 剪影(alpha)填黑、在 8 个方向偏移各画一遍,再把内容盖上——等价歌词的黑 keyline:抗锯齿边缘
     # 落黑上、绿幕干净抠。emoji 也走剪影(不受"字形路径不出彩色"限制),彩色 emoji + 黑边一体。
-    GIFT_ICON = 56          # 图标显示边长(px,base;实际乘 gift_scale)
-    GIFT_ICON_GAP = 9       # 图标与文字间距(base)
-    GIFT_GAP = 10           # 卡片竖直间距(base)
-    GIFT_TEXT_PT = 18       # 自定义文字字号(base)
-    GIFT_OUTLINE = 3        # 黑描边/keyline 宽(base;绿幕干净抠)
-    GIFT_SCALE_MIN = 0.6    # 尺寸下限(配置窗滑块 60%)
+    GIFT_ICON = 48          # 图标显示边长(px,base;实际乘 gift_scale)
+    GIFT_ICON_GAP = 8       # 图标与文字间距(base)
+    GIFT_GAP = 9            # 卡片竖直间距(base)
+    GIFT_TEXT_PT = 16       # 自定义文字字号(base)
+    # 黑描边宽:剪影外扩 r(全部外露)。对齐歌单描边视觉粗细——歌单用居中笔画
+    # OW_BLACK(6)×font_small/font_big=4(外露约 2px),故这里取 r=2 与之相当(别更粗)。
+    GIFT_OUTLINE = 2        # 黑描边/keyline 宽(base;绿幕干净抠,粗细看齐歌单)
+    GIFT_SCALE_MIN = 0.4    # 尺寸下限(配置窗滑块 40%;可缩得更小)
     GIFT_SCALE_MAX = 2.0    # 尺寸上限(配置窗滑块 200%)
     # 黑描边的 8 个偏移方向(×描边宽 r):内容剪影填黑在各方向画一遍 = 一圈轮廓
     _GIFT_OUTLINE_OFFS = ((-1, -1), (0, -1), (1, -1), (-1, 0),

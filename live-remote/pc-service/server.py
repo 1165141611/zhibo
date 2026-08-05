@@ -377,7 +377,7 @@ def _restore_persist():
                 pass
     if data.get("gift_scale") is not None:
         try:
-            STATE["gift_scale"] = max(0.6, min(2.0, float(data["gift_scale"])))
+            STATE["gift_scale"] = max(0.4, min(2.0, float(data["gift_scale"])))
         except Exception:
             pass
     for _k in ("player_x", "player_y"):          # 播放器窗口位置(拉起播放器后统一下发,见 start_player)
@@ -1320,7 +1320,7 @@ def _player_reader(proc):
                     "gifts_visible": st.get("gifts_show", STATE.get("gifts_visible", True)),
                     "gift_x": st.get("gift_x", STATE.get("gift_x", 24)),
                     "gift_y": st.get("gift_y", STATE.get("gift_y", 300)),
-                    "gift_scale": st.get("gift_scale", STATE.get("gift_scale", 1.0)),
+                    "gift_scale": max(0.4, min(2.0, float(st.get("gift_scale", STATE.get("gift_scale", 1.0))))),
                     # 播放器窗口桌面位置(拖动记忆,跨重启缓存;仅缓存,不推手机——纯 PC 侧信息)
                     "player_x": st.get("win_x", STATE.get("player_x")),
                     "player_y": st.get("win_y", STATE.get("player_y")),
@@ -1631,7 +1631,7 @@ def set_gift_scale(v, save=True):
     """礼物菜单尺寸(0.6~2.0)。配置窗滑块调:拖动时 save=False 只 live 推播放器(preview),
     松手 save=True 存盘 + 广播。夹在上下限内。"""
     try:
-        s = max(0.6, min(2.0, float(v)))
+        s = max(0.4, min(2.0, float(v)))
     except Exception:
         return
     STATE["gift_scale"] = s
@@ -3074,7 +3074,7 @@ def _open_gift_window(selftest=False):
                 pct = int(float(v))
                 sc_lbl.config(text="%d%%" % pct)
                 set_gift_scale(pct / 100.0, save=False)      # live 预览(不存盘)
-            sc = tk.Scale(sbar, from_=60, to=200, orient="horizontal", resolution=5,
+            sc = tk.Scale(sbar, from_=40, to=200, orient="horizontal", resolution=5,
                           showvalue=False, command=_on_scale)
             sc.set(int(round(STATE.get("gift_scale", 1.0) * 100)))
             sc.pack(side="left", fill="x", expand=True, padx=6)
