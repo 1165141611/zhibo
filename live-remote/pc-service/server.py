@@ -243,6 +243,9 @@ STATE = {
     "gift_outline": 1.0,       # 礼物描边宽 0~3px(配置窗滑块,跨重启缓存)
     "gift_gap": 4,             # 礼物卡片竖直间距 0~24px(配置窗滑块,跨重启缓存)
     "gift_color": "#333333",   # 礼物描边颜色(配置窗取色器,跨重启缓存)
+    # ── 歌单/歌词样式(绿幕样式控制窗;字体大小/描边粗细/描边颜色/左右边距)──
+    "setlist_pt": 20, "setlist_outline": 4, "setlist_color": "#000000", "setlist_margin": 40,
+    "lyric_pt": 30, "lyric_outline": 6, "lyric_color": "#000000", "lyric_margin": 43,
     "player_x": None, "player_y": None,   # K歌播放器窗口桌面位置(拖动记忆,跨重启缓存)
     "performer": "八门官上",   # 演唱者(主播名):开头标题卡"演唱:<名>";托盘可改,跨重启缓存
     "k_mid": "", "k_title": "", "k_artist": "",
@@ -311,6 +314,7 @@ def _save_persist():
                 "gift_outline": float(STATE.get("gift_outline", 1.0)),
                 "gift_gap": int(STATE.get("gift_gap", 4)),
                 "gift_color": str(STATE.get("gift_color", "#333333")),
+                **{k: STATE.get(k) for k in _STYLE_KEYS},   # 歌单/歌词样式
                 "player_x": STATE.get("player_x"),
                 "player_y": STATE.get("player_y"),
                 "performer": STATE.get("performer", "八门官上"),
@@ -398,6 +402,9 @@ def _restore_persist():
             pass
     if isinstance(data.get("gift_color"), str) and data["gift_color"].strip():
         STATE["gift_color"] = data["gift_color"].strip()
+    for _k in _STYLE_KEYS:                            # 歌单/歌词样式(拉起播放器后统一下发)
+        if data.get(_k) is not None:
+            STATE[_k] = data[_k]
     for _k in ("player_x", "player_y"):          # 播放器窗口位置(拉起播放器后统一下发,见 start_player)
         if data.get(_k) is not None:
             try:
@@ -876,6 +883,7 @@ _tray_hwnd = None       # 托盘消息窗 HWND(PostMessage 跨线程唤醒托盘
 _lib_root = None        # 曲库管理窗 Tk 根(None=未开):托盘勾选反映开关态 + 单实例 + 再点即关
 _scan_root = None       # 扫描导入窗 Tk 根(同上)
 _gift_root = None       # 礼物菜单配置窗 Tk 根(同上)
+_style_root = None      # 绿幕样式控制窗 Tk 根(同上)
 _last_import_mid = None  # 最近一首入库的 mid(=当前气泡通知对应的歌;点气泡→改它)
 # 自定义窗口消息:WM_USER(0x400) pystray 自用 +10(STOP)/+11(NOTIFY);我们用 +20 触发刷新
 WM_TRAY_REFRESH = 0x400 + 20
@@ -1297,6 +1305,57 @@ def run_server():
     uvicorn.run(app, host=config.HOST, port=config.PORT, log_level="warning")
 
 
+# 歌单/歌词样式 STATE 键(回读/推送/存盘统一遍历;字体 pt 的 IPC 命令名是 *_font,见 _GP_CMD)
+_STYLE_KEYS = ("setlist_pt", "setlist_outline", "setlist_color", "setlist_margin",
+               "lyric_pt", "lyric_outline", "lyric_color", "lyric_margin")
+# 绿幕样式控制:STATE 键 → 播放器 IPC 命令名(字体大小命令名是 *_font,其余同名)
+_GP_CMD = {
+    "gift_scale": "gift_scale", "gift_outline": "gift_outline", "gift_gap": "gift_gap",
+    "gift_color": "gift_color",
+    "setlist_pt": "setlist_font", "setlist_outline": "setlist_outline",
+    "setlist_color": "setlist_color", "setlist_margin": "setlist_margin",
+    "lyric_pt": "lyric_font", "lyric_outline": "lyric_outline",
+    "lyric_color": "lyric_color", "lyric_margin": "lyric_margin",
+}
+# STATE 键 → (kind, lo, hi):kind 'f'=float / 'i'=int / 'c'=颜色(#rrggbb)
+_GP_RANGE = {
+    "gift_scale": ("f", 0.4, 2.0), "gift_outline": ("f", 0.0, 3.0), "gift_gap": ("i", 0, 24),
+    "gift_color": ("c", 0, 0),
+    "setlist_pt": ("i", 8, 40), "setlist_outline": ("f", 0.0, 8.0),
+    "setlist_color": ("c", 0, 0), "setlist_margin": ("i", 0, 320),
+    "lyric_pt": ("i", 16, 56), "lyric_outline": ("f", 0.0, 10.0),
+    "lyric_color": ("c", 0, 0), "lyric_margin": ("i", 0, 320),
+}
+
+
+def set_style(key, v, save=True):
+    """绿幕样式统一设定:夹取 → 更新 STATE → 推播放器(命令名查 _GP_CMD)→ 可选存盘+广播。
+    滑块拖动 save=False 只 live 推(预览),松手/选色 save=True 存盘。"""
+    cmd, spec = _GP_CMD.get(key), _GP_RANGE.get(key)
+    if cmd is None or spec is None:
+        return
+    kind, lo, hi = spec
+    if kind == "c":
+        s = (str(v) or "").strip()
+        if not s:
+            return
+        STATE[key] = s
+        _player_send(cmd + " " + s)
+    else:
+        try:
+            n = float(v)
+        except Exception:
+            return
+        n = max(lo, min(hi, n))
+        if kind == "i":
+            n = int(round(n))
+        STATE[key] = n
+        _player_send(cmd + ((" %.3f" % n) if kind == "f" else (" " + str(n))))
+    if save:
+        _save_persist()
+        _threadsafe_broadcast()
+
+
 # ── K歌播放器子进程 + 托盘刷新 ────────────────────────
 def _player_reader(proc):
     """读播放器 stdout:VIS:0/1(可见性)、STATE {json}(进度/播放/调/原唱)。
@@ -1326,6 +1385,7 @@ def _player_reader(proc):
                 go_before = STATE.get("gift_outline")
                 gg_before = STATE.get("gift_gap")
                 gc_before = STATE.get("gift_color")
+                style_before = {k: STATE.get(k) for k in _STYLE_KEYS}
                 px_before = STATE.get("player_x")
                 py_before = STATE.get("player_y")
                 STATE.update({
@@ -1345,6 +1405,15 @@ def _player_reader(proc):
                     "gift_outline": max(0.0, min(3.0, float(st.get("gift_outline", STATE.get("gift_outline", 1.0))))),
                     "gift_gap": max(0, min(24, int(st.get("gift_gap", STATE.get("gift_gap", 4))))),
                     "gift_color": str(st.get("gift_color", STATE.get("gift_color", "#333333"))),
+                    # 歌单/歌词样式回读(播放器鼠标拖动/样式窗改动都同步缓存)
+                    "setlist_pt": int(st.get("setlist_pt", STATE.get("setlist_pt", 20))),
+                    "setlist_outline": float(st.get("setlist_outline", STATE.get("setlist_outline", 4))),
+                    "setlist_color": str(st.get("setlist_color", STATE.get("setlist_color", "#000000"))),
+                    "setlist_margin": int(st.get("setlist_margin", STATE.get("setlist_margin", 40))),
+                    "lyric_pt": int(st.get("lyric_pt", STATE.get("lyric_pt", 30))),
+                    "lyric_outline": float(st.get("lyric_outline", STATE.get("lyric_outline", 6))),
+                    "lyric_color": str(st.get("lyric_color", STATE.get("lyric_color", "#000000"))),
+                    "lyric_margin": int(st.get("lyric_margin", STATE.get("lyric_margin", 43))),
                     # 播放器窗口桌面位置(拖动记忆,跨重启缓存;仅缓存,不推手机——纯 PC 侧信息)
                     "player_x": st.get("win_x", STATE.get("player_x")),
                     "player_y": st.get("win_y", STATE.get("player_y")),
@@ -1362,6 +1431,7 @@ def _player_reader(proc):
                         or STATE.get("gift_outline") != go_before
                         or STATE.get("gift_gap") != gg_before
                         or STATE.get("gift_color") != gc_before
+                        or {k: STATE.get(k) for k in _STYLE_KEYS} != style_before
                         or STATE.get("player_x") != px_before
                         or STATE.get("player_y") != py_before):
                     _save_persist()
@@ -1434,6 +1504,9 @@ def start_player():
         _player_send("gift_outline %.2f" % float(STATE.get("gift_outline", 1.0)))
         _player_send("gift_gap " + str(int(STATE.get("gift_gap", 4))))
         _player_send("gift_color " + str(STATE.get("gift_color", "#333333")))
+        # 歌单/歌词样式(字体 pt 的 IPC 命令名是 *_font)
+        for _k in _STYLE_KEYS:
+            _player_send(_GP_CMD[_k] + " " + str(STATE.get(_k)))
         _push_gifts(force=True)
         if STATE.get("player_x") is not None and STATE.get("player_y") is not None:
             _player_send("pos %d %d" % (int(STATE["player_x"]), int(STATE["player_y"])))  # 恢复上次窗口位置
@@ -1543,6 +1616,15 @@ def _toggle_gift_window(icon=None, item=None):
         _ui_post(lambda w=r: _safe_destroy(w))
     else:
         _open_gift_window()
+
+
+def _toggle_style_window(icon=None, item=None):
+    """托盘「绿幕样式控制」:未开→开;已开→关窗(单实例)。勾选态随 _style_root 反映。"""
+    r = _style_root
+    if r is not None:
+        _ui_post(lambda w=r: _safe_destroy(w))
+    else:
+        _open_style_window()
 
 
 def _on_lib_change():
@@ -3129,71 +3211,10 @@ def _open_gift_window(selftest=False):
                 _deb["id"] = root.after(200, _render_cat)
             q.trace_add("write", _on_query)
 
-            # ── 样式调节:尺寸/描边粗细/间距/描边颜色,滑块拖动 live 推播放器预览、松手存盘 ──
-            style = tk.LabelFrame(root, text="样式(实时预览,松手/选定即存)")
-            style.pack(fill="x", padx=10, pady=(2, 0))
-            # 行1:菜单尺寸(整行,滑块拉满)
-            r0 = tk.Frame(style); r0.pack(fill="x", padx=6, pady=(4, 2))
-            tk.Label(r0, text="菜单尺寸", width=8, anchor="w").pack(side="left")
-            sc_lbl = tk.Label(r0, text="%d%%" % int(round(STATE.get("gift_scale", 1.0) * 100)), width=5)
-            sc_lbl.pack(side="right")
-
-            def _on_scale(v):
-                pct = int(float(v)); sc_lbl.config(text="%d%%" % pct)
-                set_gift_scale(pct / 100.0, save=False)
-            sc = tk.Scale(r0, from_=40, to=200, orient="horizontal", resolution=5,
-                          showvalue=False, command=_on_scale)
-            sc.set(int(round(STATE.get("gift_scale", 1.0) * 100)))
-            sc.pack(side="left", fill="x", expand=True, padx=6)
-            sc.bind("<ButtonRelease-1>", lambda e: set_gift_scale(sc.get() / 100.0, save=True))
-            # 行2:描边粗细 | 菜单间距 | 描边颜色(三组并排,吃满横向)
-            r1 = tk.Frame(style); r1.pack(fill="x", padx=6, pady=(0, 5))
-            of = tk.Frame(r1); of.pack(side="left", fill="x", expand=True)
-            tk.Label(of, text="描边粗细", width=8, anchor="w").pack(side="left")
-            ol_lbl = tk.Label(of, text="%.1f" % float(STATE.get("gift_outline", 1.0)), width=4)
-            ol_lbl.pack(side="right")
-
-            def _on_outline(v):
-                w = float(v); ol_lbl.config(text="%.1f" % w)
-                set_gift_outline(w, save=False)
-            osc = tk.Scale(of, from_=0.0, to=3.0, orient="horizontal", resolution=0.1,
-                           showvalue=False, command=_on_outline)
-            osc.set(float(STATE.get("gift_outline", 1.0)))
-            osc.pack(side="left", fill="x", expand=True, padx=4)
-            osc.bind("<ButtonRelease-1>", lambda e: set_gift_outline(osc.get(), save=True))
-
-            gf = tk.Frame(r1); gf.pack(side="left", fill="x", expand=True, padx=(14, 0))
-            tk.Label(gf, text="菜单间距", width=8, anchor="w").pack(side="left")
-            gp_lbl = tk.Label(gf, text=str(int(STATE.get("gift_gap", 4))), width=3)
-            gp_lbl.pack(side="right")
-
-            def _on_gap(v):
-                g = int(float(v)); gp_lbl.config(text=str(g))
-                set_gift_gap(g, save=False)
-            gsc = tk.Scale(gf, from_=0, to=24, orient="horizontal", resolution=1,
-                           showvalue=False, command=_on_gap)
-            gsc.set(int(STATE.get("gift_gap", 4)))
-            gsc.pack(side="left", fill="x", expand=True, padx=4)
-            gsc.bind("<ButtonRelease-1>", lambda e: set_gift_gap(gsc.get(), save=True))
-
-            cf = tk.Frame(r1); cf.pack(side="left", padx=(14, 0))
-            tk.Label(cf, text="描边颜色").pack(side="left")
-            cur_col = {"v": str(STATE.get("gift_color", "#333333"))}
-            sw = tk.Label(cf, width=3, bg=cur_col["v"], relief="solid", bd=1)
-            sw.pack(side="left", padx=4)
-
-            def _pick_color():
-                res = colorchooser.askcolor(color=cur_col["v"], parent=root, title="描边颜色")
-                if res and res[1]:
-                    cur_col["v"] = res[1]
-                    sw.config(bg=res[1])
-                    set_gift_color(res[1], save=True)
-            tk.Button(cf, text="选色", command=_pick_color).pack(side="left")
-
-            # ── 底部:提示 + 保存/关闭 ──
-            bar = tk.Frame(root); bar.pack(fill="x", padx=10, pady=(0, 10))
-            tk.Label(bar, text="保存后即推送到播放器绿幕(左侧竖排);播放器内可鼠标拖动摆放。",
-                     fg="#888888").pack(side="left")
+            # ── 底部:提示 + 保存/关闭(样式调节已移到托盘「绿幕样式控制」窗)──
+            bar = tk.Frame(root); bar.pack(fill="x", padx=10, pady=(2, 10))
+            tk.Label(bar, text="保存后即推送到播放器绿幕(左侧竖排);位置/样式在「绿幕样式控制」窗与播放器内调。",
+                     fg="#888888", wraplength=360, justify="left").pack(side="left")
 
             def _save():
                 _sync_text_vars()
@@ -3222,6 +3243,112 @@ def _open_gift_window(selftest=False):
                 except Exception:
                     _gift_root = None
                     refresh_tray()
+
+    if selftest:
+        threading.Thread(target=_tk_window_thread(_win), daemon=True).start()
+    else:
+        _ui_post(_win)
+
+
+def _open_style_window(selftest=False):
+    """托盘「绿幕样式控制」:统一调 礼物菜单 / 歌单 / 歌词 三块的样式——字体大小 / 描边粗细 /
+    描边颜色 / 左右边距(歌单歌词=居中带宽度)/ 礼物尺寸间距。滑块拖动 live 预览、松手/选色即存
+    (`set_style`),经 IPC 推播放器 + 缓存。歌单竖直位置在**播放器里鼠标拖动**(本窗不含);歌词固定底部。"""
+
+    def _win():
+        global _style_root
+        try:
+            import tkinter as tk
+            from tkinter import colorchooser
+            root = tk.Tk() if selftest else tk.Toplevel(_ui_root)
+            root.title("绿幕样式控制")
+            root.geometry("470x560")
+            _style_root = root
+            if not selftest:
+                def _on_closed():
+                    global _style_root
+                    _style_root = None
+                    refresh_tray()
+                _tk_win_close_guard(root, _on_closed)
+                refresh_tray()
+            root.attributes("-topmost", True)
+
+            def slider_row(parent, label, key, lo, hi, res, is_pct=False):
+                fr = tk.Frame(parent); fr.pack(fill="x", padx=8, pady=2)
+                tk.Label(fr, text=label, width=8, anchor="w").pack(side="left")
+                cur = STATE.get(key)
+                vlbl = tk.Label(fr, width=5, text=("%d%%" % round(cur * 100)) if is_pct
+                                else (("%.1f" % cur) if res < 1 else str(int(cur))))
+                vlbl.pack(side="right")
+
+                def _on(v, key=key, is_pct=is_pct, res=res, vlbl=vlbl):
+                    x = float(v)
+                    if is_pct:
+                        vlbl.config(text="%d%%" % int(x)); set_style(key, x / 100.0, save=False)
+                    else:
+                        vlbl.config(text=("%.1f" % x) if res < 1 else str(int(x)))
+                        set_style(key, x, save=False)
+                s = tk.Scale(fr, from_=lo, to=hi, orient="horizontal", resolution=res,
+                             showvalue=False, command=_on)
+                s.set(round(cur * 100) if is_pct else cur)
+                s.pack(side="left", fill="x", expand=True, padx=6)
+                s.bind("<ButtonRelease-1>", lambda e, s=s, key=key, is_pct=is_pct:
+                       set_style(key, (s.get() / 100.0 if is_pct else s.get()), save=True))
+
+            def color_row(parent, label, key):
+                fr = tk.Frame(parent); fr.pack(fill="x", padx=8, pady=(2, 4))
+                tk.Label(fr, text=label, width=8, anchor="w").pack(side="left")
+                hold = {"v": str(STATE.get(key, "#000000"))}
+                sw = tk.Label(fr, width=4, bg=hold["v"], relief="solid", bd=1)
+                sw.pack(side="left", padx=4)
+
+                def _pick(key=key, hold=hold, sw=sw, label=label):
+                    res = colorchooser.askcolor(color=hold["v"], parent=root, title=label)
+                    if res and res[1]:
+                        hold["v"] = res[1]; sw.config(bg=res[1]); set_style(key, res[1], save=True)
+                tk.Button(fr, text="选色", command=_pick).pack(side="left")
+
+            g = tk.LabelFrame(root, text="礼物菜单(播放器内鼠标拖动摆位)")
+            g.pack(fill="x", padx=10, pady=(8, 2))
+            slider_row(g, "尺寸", "gift_scale", 40, 200, 5, is_pct=True)
+            slider_row(g, "描边粗细", "gift_outline", 0.0, 3.0, 0.1)
+            slider_row(g, "卡片间距", "gift_gap", 0, 24, 1)
+            color_row(g, "描边颜色", "gift_color")
+
+            sl = tk.LabelFrame(root, text="歌单(播放器内鼠标竖直拖动位置)")
+            sl.pack(fill="x", padx=10, pady=2)
+            slider_row(sl, "字体大小", "setlist_pt", 8, 40, 1)
+            slider_row(sl, "描边粗细", "setlist_outline", 0.0, 8.0, 0.5)
+            slider_row(sl, "左右边距", "setlist_margin", 0, 320, 4)
+            color_row(sl, "描边颜色", "setlist_color")
+
+            ly = tk.LabelFrame(root, text="歌词(固定底部,不调位置)")
+            ly.pack(fill="x", padx=10, pady=2)
+            slider_row(ly, "字体大小", "lyric_pt", 16, 56, 1)
+            slider_row(ly, "描边粗细", "lyric_outline", 0.0, 10.0, 0.5)
+            slider_row(ly, "左右边距", "lyric_margin", 0, 320, 4)
+            color_row(ly, "描边颜色", "lyric_color")
+
+            bar = tk.Frame(root); bar.pack(fill="x", padx=10, pady=8)
+            tk.Label(bar, text="拖动即实时预览、松手/选色即存盘。左右边距=离窗口两侧距离(居中带宽度)。",
+                     fg="#888888", wraplength=330, justify="left").pack(side="left")
+            tk.Button(bar, text="关闭", width=8, command=root.destroy).pack(side="right")
+
+            root.after(120, root.focus_force)
+            if selftest:
+                def _auto():
+                    set_style("lyric_pt", 40); set_style("setlist_margin", 100)
+                    print("[STYLEWIN-TEST] lyric_pt=%s setlist_margin=%s" %
+                          (STATE.get("lyric_pt"), STATE.get("setlist_margin")), flush=True)
+                    root.after(300, root.destroy)
+                root.after(600, _auto); root.mainloop()
+        except Exception as ex:
+            print("[STYLE] 样式窗失败: %s" % ex)
+            if not selftest:
+                try:
+                    root.destroy()
+                except Exception:
+                    _style_root = None; refresh_tray()
 
     if selftest:
         threading.Thread(target=_tk_window_thread(_win), daemon=True).start()
@@ -3309,6 +3436,9 @@ def run_tray(url):
         # 礼物菜单配置:同款勾选式开关(选礼物+自定义文字,推播放器绿幕竖排)
         pystray.MenuItem("礼物菜单配置", _toggle_gift_window,
                          checked=lambda i: _gift_root is not None),
+        # 绿幕样式控制:礼物/歌单/歌词的字体大小/描边/颜色/边距统一调
+        pystray.MenuItem("绿幕样式控制", _toggle_style_window,
+                         checked=lambda i: _style_root is not None),
         # 演唱者(主播名):点击编辑,开头标题卡"演唱:<名>"用
         pystray.MenuItem(lambda i: f"演唱者：{STATE.get('performer', '八门官上')}", on_edit_performer),
         pystray.Menu.SEPARATOR,

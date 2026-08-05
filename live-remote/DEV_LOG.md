@@ -1071,3 +1071,31 @@ gift_color`、STATE 回读、`start_player` 重推、跨重启缓存,全套照 `
 
 **教训**:绿幕上叠彩色/半透明内容,不一定要垫不透明底板——"取剪影 alpha 填黑、多方向偏移描边"能给**任意位图
 (含彩色 emoji)**加干净黑 keyline,比矩形底板轻。这套剪影描边可复用到日后别的绿幕浮层元素。
+
+## 二十一、绿幕样式控制窗:礼物/歌单/歌词统一样式 + 歌单改鼠标拖动(2026-08-06)
+
+作者要把样式控制集中管理、并给歌单/歌词也加样式项。做了:
+
+**新托盘窗「绿幕样式控制」**(`_open_style_window`,单实例 `_style_root`):三分区(礼物菜单 / 歌单 / 歌词),
+每区滑块 + 取色器。礼物样式从「礼物菜单配置」窗**移过来**(那窗只留选礼物+文字+排序)。统一走 `set_style(key,v,save)`:
+`_GP_CMD` 查播放器 IPC 命令名(**字体大小的命令名是 `*_font`**,其余同名)、`_GP_RANGE` 夹取;滑块拖动 `save=False`
+live 预览、松手/选色 `save=True` 存盘。`_STYLE_KEYS`(歌单/歌词 8 项)在 STATE 回读 / `_save/_restore_persist` /
+`start_player` 重推里统一遍历,和礼物样式一样跨重启缓存。
+
+**歌单样式**(播放器实例属性 `setlist_pt/outline/color/margin`):字体大小 / 描边宽 / 描边色 / **左右边距**。
+**歌词样式**(`lyric_pt/outline/color/margin`):同上。`_apply_font` 改用 `lyric_pt`/`setlist_pt` 建 font_big/small;
+`_word_entry` 的 base/hi 描边改用 `lyric_color`/`lyric_outline`(不再写死黑/OW_BLACK);`_setlist_entry` 用
+`setlist_color/outline`;`_draw_lyrics` 的 margin 用 `lyric_margin`。**描边颜色 = 那圈黑 keyline 的颜色**(默认黑,
+绿幕最干净;歌词 KTV 蓝白填充不受此控),淡化同礼物建议选深灰。
+
+**歌单竖直位置改鼠标拖动**:`mousePressEvent` 命中检测加一档——按在歌单**居中带**(`_setlist_bbox`)→ `_setlist_drag`
+**仅竖直**拖(横向固定居中),上不越顶、下不压歌词(`_setlist_max_y`=音准带顶 − 歌单高);原 `Ctrl+↑↓` 保留。
+命中优先级:礼物条 → 歌单带 → 拖整窗。**歌单/歌词都改成"水平居中带"**:`_setlist_band`/`_draw_lyrics` 按 margin
+左右留白、居中(margin=离窗口两侧距离=居中带宽度)。歌词位置**固定底部**,不做拖动。
+
+**边界处理**:描边宽做成可调后,`_make_line_pixmap` 的 `PAD=6` 仍够(描边居中于路径、外露 ow/2;歌词描边上限 10→
+5px<6、歌单 8→4px<6,不裁边)。字体大小变 → `_apply_font` 重建 + 清缓存(_line_h 变,`_layout` 自适应)。
+描边宽/色变 → 清 `_word_cache`/`_setlist_pix` 重建;边距变 → 只影响绘制位置,不重建 pixmap。
+
+**教训**:歌词渲染是全项目最吃 GIL/最多缓存的地方,加可调项时严格分清"要重建 pixmap 的(字体/描边宽/描边色)"
+和"只改绘制位置的(边距/竖直位置)"——后者绝不清缓存,免无谓重建抢音频回调 GIL(同 setlist 冗余重推那条教训)。

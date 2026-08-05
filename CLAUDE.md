@@ -100,9 +100,11 @@
   与 `qqmusic_import.py`。去重复用 `library.manifest()`;凭据/暂存在 `config.QQ_CRED_PATH/QQ_STAGING_DIR`。
   **礼物菜单(2026-08-05)**:绿幕左侧竖排"礼物→权益"引导条(抖音礼物图标 + 自定义文字,如 🎈点歌/🍰插队)。
   `gifts.py` 抓抖音 `webcast/gift/list?aid=1128`(匿名可取)→ 缓存目录 + 按需下图标(`config.GIFT_*`);托盘
-  「礼物菜单配置」窗选礼物+填文字+排序+**「样式」面板(尺寸 40~200% / 描边粗细 0~3px / 间距 0~24px / 描边颜色
-  取色器)**,`set_gift_config`→`_push_gifts`(去重)经 IPC `gifts` 推播放器;显隐 `gifts_toggle`/G 键、鼠标拖动摆位、
-  `gift_scale/gift_outline/gift_gap/gift_color` 样式;上述全部经 STATE 回读存 `state_cache.json`。详见 DEV_LOG.md 第二十节。
+  「礼物菜单配置」窗选礼物+填文字+排序,`set_gift_config`→`_push_gifts`(去重)经 IPC `gifts` 推播放器;显隐
+  `gifts_toggle`/G 键、鼠标拖动摆位。**绿幕样式控制窗(2026-08-06)**:托盘「绿幕样式控制」统一调 礼物/歌单/歌词
+  三块样式(字体大小/描边粗细/描边颜色/左右边距=居中带宽度),`set_style(key,v)`→`_GP_CMD/_GP_RANGE`→IPC 推播放器;
+  **歌单竖直位置改播放器内鼠标拖动**(仅纵向、居中带、上不越顶下不压歌词),歌词固定底部;`_STYLE_KEYS` + 礼物样式
+  全部 STATE 回读存 `state_cache.json`。详见 DEV_LOG.md 第二十节。
 - **LiveRemote**:安卓原生 App(Compose,演唱/队列/遥控三页签),遥控页含声卡场景 + 窗口开关
   (Studio One / K歌歌词 / 音准线显隐);**QQ音乐 已从遥控页单列控制区移除,改由常驻悬浮球(现含遥控页,
   三页签通吃)统一承载**;点歌抽屉支持搜索 + 触底分页;**演唱页音准块高亮对齐 PC(2026-07-15):

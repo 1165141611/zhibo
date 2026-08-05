@@ -23,7 +23,8 @@
 | 多曲/曲库 | pc-service 曲库导入器 + IPC `load <mid>`;托盘曲库管理页(勾选/编辑/播放/搜索) |
 | 直播画面 | 自渲染绿底 + 黑描边 → 绿幕抠图;**竖屏 3:4 窗 720×960** |
 | 字体 | `Q` 键循环 7 款(雅黑/黑体/思源黑/思源宋/楷体…),缓存 |
-| 顶端歌单 | 曲库勾选的歌 → 顶端横向滚动字幕;`O` 显隐、`Ctrl+↑↓` 移位,缓存 |
+| 顶端歌单 | 曲库勾选的歌 → 顶端**水平居中带**横向滚动字幕;`O` 显隐、**鼠标竖直拖动**(仅纵向,上不越顶下不压歌词)/`Ctrl+↑↓` 移位;**字号/描边宽/描边色/左右边距**(=居中带宽度)可调,缓存 |
+| 歌词样式 | 除 KTV 双色/字体循环外,**字号/描边(黑 keyline)宽/描边色/左右边距**可调(绿幕样式控制窗);位置固定底部 |
 | 礼物菜单 | 绿幕**左侧竖排"礼物→权益"引导条**(抖音礼物图标 + 自定义文字,如 🎈点歌 / 🍰插队);**无底板,图标/文字各自描一圈黑边**(贴纸式轮廓——取内容剪影填黑、8 向偏移画一圈;彩色半透明礼物 PNG/文字裸贴绿会留绿边,描边把抗锯齿边缘落黑上、绿幕干净抠;emoji 也一体描边);`G` 显隐、**鼠标可单独拖动摆放**(命中检测);**配置窗可调 尺寸(40~200%)/描边粗细(0~3px)/间距(0~24px)/描边颜色(取色器,不透明)**;内容由 pc-service「礼物菜单配置」窗选,显隐/位置/以上样式全缓存 |
 | 伴奏音量 | 手机音量键同步,感知(平方)曲线 |
 | 歌名/歌手显示 | **采用入库保存值**(`<mid>/meta.json`,清洗 + 手动改名后),非 QRC 原文;见下「关键技术决策」 |
@@ -261,7 +262,9 @@ PC 版对用户自传/部分歌下不了伴奏;手机版能下。安卓(adb 可�
 | `font <idx>` | 歌词字体索引(`FONTS` 列表:0雅黑/1黑体/2思源黑Black/3思源黑Medium/4思源宋/5思源宋Black/6楷体;越界取模;Q 键循环 + pc-service 缓存恢复) |
 | `setlist <json>` | 顶端滚动歌单内容(JSON 歌名数组,pc-service 据曲库勾选推来) |
 | `setlist_show 0|1` | 顶端歌单显隐(O 键;pc-service 缓存) |
-| `setlist_y <n>` | 顶端歌单竖直位置(Ctrl+↑↓;pc-service 缓存) |
+| `setlist_y <n>` | 顶端歌单竖直位置(鼠标竖直拖动 / Ctrl+↑↓;pc-service 缓存) |
+| `setlist_font <n>` / `setlist_outline <f>` / `setlist_color <#rgb>` / `setlist_margin <n>` | 歌单样式:字号 / 描边宽 / 描边色 / 左右边距(居中带宽度;绿幕样式控制窗) |
+| `lyric_font <n>` / `lyric_outline <f>` / `lyric_color <#rgb>` / `lyric_margin <n>` | 歌词样式:字号 / 描边(黑 keyline)宽 / 描边色 / 左右边距(同上) |
 | `gifts <json>` | 礼物菜单内容(JSON `[{icon:图标绝对路径, text}]`,pc-service 配置窗选礼物+自定义文字后解析推来;内容变才重建卡片 pixmap) |
 | `gifts_show 0\|1` | 礼物菜单显隐(`show_gifts`;G 键 / 手机遥控;pc-service 缓存) |
 | `gift_pos <x> <y>` | 礼物条左上角位置(鼠标拖动记忆,pc-service 缓存下发恢复) |
@@ -274,7 +277,7 @@ PC 版对用户自传/部分歌下不了伴奏;手机版能下。安卓(adb 可�
 
 **stdout 上报**:
 - `VIS:0/1` —— 窗口可见性(showEvent/hideEvent 触发)
-- `STATE {json}` —— 每 500ms:`pos/dur`(ms)、`playing`、`key`、`vocal`、`vol`(0-100)、`pitch`(音准线显隐)、`font`(字体索引)、`setlist_show`(歌单显隐)、`setlist_y`(歌单位置)、`gifts_show`(礼物菜单显隐)、`gift_x`/`gift_y`(礼物条位置)、`gift_scale`(缩放)、`gift_outline`/`gift_gap`/`gift_color`(描边宽/间距/颜色)、`win_x`/`win_y`(窗口桌面位置)、`mid`、`title`、`artist`
+- `STATE {json}` —— 每 500ms:`pos/dur`(ms)、`playing`、`key`、`vocal`、`vol`(0-100)、`pitch`(音准线显隐)、`font`(字体索引)、`setlist_show`(歌单显隐)、`setlist_y`(歌单位置)、`gifts_show`(礼物菜单显隐)、`gift_x`/`gift_y`(礼物条位置)、`gift_scale`(缩放)、`gift_outline`/`gift_gap`/`gift_color`(描边宽/间距/颜色)、`setlist_pt`/`setlist_outline`/`setlist_color`/`setlist_margin`(歌单样式)、`lyric_pt`/`lyric_outline`/`lyric_color`/`lyric_margin`(歌词样式)、`win_x`/`win_y`(窗口桌面位置)、`mid`、`title`、`artist`
 
 对应引擎接口(`audio_engine.py`):`set_playing`、`seek_to_ms`、`load`、`set_semitones`、`swap_buffer`、`set_volume`/`volume_pct`、`is_playing`、`duration_ms`,全部线程安全。
 
@@ -294,7 +297,7 @@ PC 版对用户自传/部分歌下不了伴奏;手机版能下。安卓(adb 可�
 | G | 礼物菜单 显示/隐藏(pc-service 回读缓存,同 P/O) |
 | Ctrl+↑↓ | 顶端歌单上下移动(上不越窗顶,下不覆盖音轨;位置缓存) |
 | B | 背景切换(透明 / 洋红抠像 / 半透黑) |
-| 鼠标拖动 | 移动窗口 |
+| 鼠标拖动 | 命中礼物条→拖礼物条;命中歌单带→**竖直拖歌单**;否则移动窗口 |
 | Esc | 退出 |
 
 > 窗口**右下角**常驻快捷键提示(`←→ 步退/进 ↑↓ 升降调 R 原唱/伴奏 P 音准线`),与左下角播放信息同款(白字黑描边)。

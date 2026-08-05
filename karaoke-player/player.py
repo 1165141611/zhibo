@@ -90,8 +90,21 @@ class KaraokeWindow(QtWidgets.QWidget):
         self.show_pitch = True                      # 音准线显隐(IPC `pitch 0/1` 控;pc-service 缓存)
         self.show_setlist = True                    # 顶端滚动歌单显隐(O 键;同 P 一起缓存)
         self.setlist_titles = []                    # 歌单歌名(pc-service 据曲库勾选推来)
-        self.setlist_y = 24                         # 歌单竖直位置(Ctrl+↑↓ 移动;缓存)
-        self._setlist_pix = None                    # 歌单滚动条 pixmap(内容/字体变时重建)
+        self.setlist_y = 24                         # 歌单竖直位置(鼠标拖动/Ctrl+↑↓;缓存)
+        self._setlist_pix = None                    # 歌单滚动条 pixmap(内容/字体/样式变时重建)
+        self._setlist_drag = False                  # 是否正在竖直拖歌单(vs 拖整窗)
+        self._setlist_drag_off = 0                  # 拖动时鼠标相对歌单顶的偏移(仅纵向)
+        # ── 歌单/歌词样式(绿幕样式控制窗可调:字体大小/描边粗细/描边颜色/左右边距)──
+        # 歌单/歌词都是**水平居中**组件,边距 = 离窗口左右两侧的距离(=居中带宽度)。
+        # 描边颜色 = 那圈黑 keyline/描边的颜色(默认黑,绿幕最干净;歌词 KTV 蓝白填充不受此控)。
+        self.setlist_pt = 20                        # 歌单字号
+        self.setlist_outline = 4                    # 歌单描边宽
+        self.setlist_color = QtGui.QColor(0, 0, 0)  # 歌单描边色
+        self.setlist_margin = 40                    # 歌单左右边距(居中带)
+        self.lyric_pt = 30                          # 歌词字号(= font_big 大小)
+        self.lyric_outline = self.OW_BLACK          # 歌词黑 keyline/描边宽
+        self.lyric_color = QtGui.QColor(0, 0, 0)    # 歌词描边(keyline)色;KTV 蓝白填充不变
+        self.lyric_margin = 43                      # 歌词左右边距(≈原 w*0.06)
         # 礼物菜单:绿幕左侧竖排"礼物→权益"引导条(如 🎈点歌 / 🍰插队)。内容由 pc-service
         # 「礼物菜单配置」窗选礼物+填自定义文字后经 IPC `gifts` 推来;G 键/IPC 显隐;鼠标可单独拖动
         # (命中检测:按在礼物条上拖它、否则拖整窗),位置/显隐经 STATE 上报 pc-service 缓存。
@@ -183,9 +196,9 @@ class KaraokeWindow(QtWidgets.QWidget):
         idx %= len(self.FONTS)
         self.font_idx = idx
         _disp, fam, bold = self.FONTS[idx]
-        self.font_big = QtGui.QFont(fam, 30)
+        self.font_big = QtGui.QFont(fam, int(self.lyric_pt))      # 歌词字号(样式窗可调)
         self.font_big.setBold(bold)
-        self.font_small = QtGui.QFont(fam, 20)
+        self.font_small = QtGui.QFont(fam, int(self.setlist_pt))  # 歌单字号(样式窗可调)
         self.font_small.setBold(bold)
         self._line_h = QtGui.QFontMetrics(self.font_big).height()
         self._word_cache.clear()
@@ -266,30 +279,36 @@ class KaraokeWindow(QtWidgets.QWidget):
             text = sep.join(self.setlist_titles) + sep
             fm = QtGui.QFontMetrics(self.font_small)
             total = fm.horizontalAdvance(text)
-            # 样式统一为"未唱歌词"款:白底 + 黑描边(比原 1px 更像 KTV 字幕),描边宽按字号
-            # 从歌词的 OW_BLACK 等比缩小(font_small 比 font_big 小),视觉权重与歌词一致。
-            ow = max(2, round(self.OW_BLACK * self.font_small.pointSizeF()
-                              / max(1.0, self.font_big.pointSizeF())))
+            # 白底 + 可调描边(样式窗:描边宽 setlist_outline、色 setlist_color;默认黑,KTV 字幕款)
+            ow = max(1, int(round(self.setlist_outline)))
             self._setlist_pix = (total, fm.height(),
                                  self._make_line_pixmap([(text, total)], self.font_small,
-                                                        self.COL_UNSUNG, ow))
+                                                        self.COL_UNSUNG,
+                                                        strokes=[(self.setlist_color, ow)]))
         return self._setlist_pix
 
     def _setlist_h(self):
         return QtGui.QFontMetrics(self.font_small).height() + 2 * self.PAD
 
+    def _setlist_band(self, w):
+        """歌单水平居中带 (左x, 带宽):左右各留 setlist_margin,横向固定居中。"""
+        m = max(0, min(int(self.setlist_margin), w // 2 - 20))
+        return m, w - 2 * m
+
     def _draw_setlist(self, p, w):
-        """顶端横向循环滚动歌单(只歌名,空格分隔)。pixmap 平铺两份+裁剪,时钟驱动无缝滚。"""
+        """顶端横向循环滚动歌单(只歌名,空格分隔)。**水平居中带**(左右留 setlist_margin)内
+        平铺两份+裁剪,时钟驱动无缝滚。"""
         ent = self._setlist_entry()
         if not ent:
             return
         period, fh, pix = ent
         y = self.setlist_y
+        bx, bw = self._setlist_band(w)
         off = (time.monotonic() * self.MARQUEE_SPEED) % period
         p.save()
-        p.setClipRect(QtCore.QRectF(0, y, w, fh + 2 * self.PAD))
-        x = -off
-        while x < w:
+        p.setClipRect(QtCore.QRectF(bx, y, bw, fh + 2 * self.PAD))
+        x = bx - off
+        while x < bx + bw:
             p.drawPixmap(QtCore.QPointF(x - self.PAD, y), pix)
             x += period
         p.restore()
@@ -418,6 +437,18 @@ class KaraokeWindow(QtWidgets.QWidget):
         gv = max(0, min(self.GIFT_GAP_MAX, self.gift_gap))
         bh = sum(ch for _, _, ch in self._gift_pix) + gv * (len(self._gift_pix) - 1)
         return QtCore.QRectF(self.gift_x, self.gift_y, bw, bh)
+
+    def _setlist_max_y(self):
+        """歌单竖直拖动/移动的下界:不压到音准带(=歌词上方)。"""
+        pitch_top, _, _ = self._layout()
+        return max(0, pitch_top - self._setlist_h())
+
+    def _setlist_bbox(self):
+        """歌单水平居中带的外接矩形(鼠标竖直拖动命中检测用);显隐关或无歌名返回 None。"""
+        if not self.show_setlist or not self.setlist_titles:
+            return None
+        bx, bw = self._setlist_band(self.width())
+        return QtCore.QRectF(bx, self.setlist_y, bw, self._setlist_h())
 
     def _tick_paint(self):
         """60fps 心跳:仅当窗口可见时才请求重绘。隐藏(服务托管默认态)时不排绘制,省 CPU。"""
@@ -631,7 +662,7 @@ class KaraokeWindow(QtWidgets.QWidget):
             return
         font = self.font_big                 # 上下两行同尺寸(不再上大下小)
         lh = self._line_h
-        margin = w * 0.06
+        margin = max(0, min(int(self.lyric_margin), w // 2 - 20))   # 左右边距(样式窗可调,居中)
         cy_bot = cy_top + lh * 1.15          # 下行略低于上行,左右错开
         dots_dy = lh * 0.9                   # 圆点在所属行顶部上方
 
@@ -798,9 +829,10 @@ class KaraokeWindow(QtWidgets.QWidget):
                    "total": sum(a for _, a in words),
                    "ascent": fm.ascent(),
                    "H": fm.height() + 2 * self.PAD,
-                   # 未唱:白底 + 黑描边(经典 KTV;外轮廓宽=OW_BLACK,与 hi 对齐)
-                   "base": self._make_line_pixmap(words, font,
-                                                  self.COL_UNSUNG, self.OW_BLACK),
+                   # 未唱:白底 + 描边(样式窗:色 lyric_color / 宽 lyric_outline;外轮廓与 hi 对齐)
+                   "base": self._make_line_pixmap(
+                       words, font, self.COL_UNSUNG,
+                       strokes=[(self.lyric_color, max(1, int(round(self.lyric_outline))))]),
                    "hi": None, "font": font}
             self._word_cache[key] = ent
             while len(self._word_cache) > 8:     # 有界,防整首歌驻留(本机内存紧)
@@ -822,11 +854,12 @@ class KaraokeWindow(QtWidgets.QWidget):
                 break
         if hi > 0:      # 高亮版整行盖上,裁剪到进度线;两版外轮廓同宽,边界干净
             if ent["hi"] is None:
-                # 已唱:蓝底 + 白描边 + 黑 keyline(最外黑,保绿幕边界干净)
+                # 已唱:蓝底 + 白描边 + keyline(最外=lyric_color/lyric_outline,保绿幕边界干净)
+                ow_b = max(1, int(round(self.lyric_outline)))
                 ent["hi"] = self._make_line_pixmap(
                     ent["words"], ent["font"], self.COL_SUNG,
-                    strokes=[(self.COL_OUTLINE, self.OW_BLACK),
-                             (self.COL_SUNG_OUTLINE, self.OW_WHITE)])
+                    strokes=[(self.lyric_color, ow_b),
+                             (self.COL_SUNG_OUTLINE, min(self.OW_WHITE, ow_b - 1))])
             p.save()
             p.setClipRect(QtCore.QRectF(left, top, self.PAD + hi, ent["H"]))
             p.drawPixmap(QtCore.QPointF(left, top), ent["hi"])
@@ -1019,6 +1052,10 @@ class KaraokeWindow(QtWidgets.QWidget):
                   "gift_scale": round(self.gift_scale, 3),
                   "gift_outline": round(self.gift_outline, 2),
                   "gift_gap": int(self.gift_gap), "gift_color": self.gift_color.name(),
+                  "setlist_pt": int(self.setlist_pt), "setlist_outline": round(self.setlist_outline, 1),
+                  "setlist_color": self.setlist_color.name(), "setlist_margin": int(self.setlist_margin),
+                  "lyric_pt": int(self.lyric_pt), "lyric_outline": round(self.lyric_outline, 1),
+                  "lyric_color": self.lyric_color.name(), "lyric_margin": int(self.lyric_margin),
                   "mid": self.song.mid, "title": self.song.title,
                   "artist": self.song.artist}
             if self._saved_pos is not None:   # 有真实位置(显示过 / pc-service 已下发)才上报,免把 (0,0) 缓存进去
@@ -1031,12 +1068,17 @@ class KaraokeWindow(QtWidgets.QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == QtCore.Qt.LeftButton:
-            # 命中检测:按在礼物条上 → 单独拖礼物条;否则 → 拖整窗(摆捕获区,原行为)
+            # 命中检测优先级:礼物条 → 歌单(仅竖直拖) → 拖整窗(摆捕获区,原行为)
             lp = e.position().toPoint()
-            box = self._gift_bbox()
-            if box is not None and box.contains(QtCore.QPointF(lp)):
+            fp = QtCore.QPointF(lp)
+            gbox = self._gift_bbox()
+            sbox = self._setlist_bbox()
+            if gbox is not None and gbox.contains(fp):
                 self._gift_drag = True
                 self._gift_drag_off = (lp.x() - self.gift_x, lp.y() - self.gift_y)
+            elif sbox is not None and sbox.contains(fp):
+                self._setlist_drag = True            # 歌单只竖直拖(横向固定居中)
+                self._setlist_drag_off = lp.y() - self.setlist_y
             else:
                 self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
@@ -1045,12 +1087,16 @@ class KaraokeWindow(QtWidgets.QWidget):
             lp = e.position().toPoint()
             self.gift_x = int(max(0, min(self.width() - 24, lp.x() - self._gift_drag_off[0])))
             self.gift_y = int(max(0, min(self.height() - 24, lp.y() - self._gift_drag_off[1])))
+        elif self._setlist_drag:                     # 拖歌单:仅竖直,上不越顶、下不压歌词
+            ny = e.position().toPoint().y() - self._setlist_drag_off
+            self.setlist_y = int(max(0, min(self._setlist_max_y(), ny)))
         elif self._drag_pos is not None:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
         self._gift_drag = False
+        self._setlist_drag = False
         if self.isVisible():
             self._saved_pos = (self.x(), self.y())   # 拖动结束即记住位置(下次 show 恢复)
 
@@ -1250,6 +1296,52 @@ def main():
                 if col.isValid() and col.name() != win.gift_color.name():
                     win.gift_color = col
                     win._gift_pix = None            # 描边色变了重建卡片
+            # 歌单样式:字体大小/描边粗细/描边颜色/左右边距(绿幕样式控制窗)
+            elif c == "setlist_font" and arg is not None:
+                try:
+                    win.setlist_pt = max(8, min(40, int(float(arg))))
+                    win._apply_font(win.font_idx)   # 重建 font_small + 清歌单/歌词缓存
+                except ValueError:
+                    pass
+            elif c == "setlist_outline" and arg is not None:
+                try:
+                    win.setlist_outline = max(0, min(8, float(arg)))
+                    win._setlist_pix = None
+                except ValueError:
+                    pass
+            elif c == "setlist_color" and arg is not None:
+                col = QtGui.QColor(arg.strip())
+                if col.isValid():
+                    win.setlist_color = col
+                    win._setlist_pix = None
+            elif c == "setlist_margin" and arg is not None:
+                try:
+                    win.setlist_margin = max(0, min(320, int(float(arg))))
+                except ValueError:
+                    pass
+            # 歌词样式:字体大小/描边粗细/描边颜色/左右边距
+            elif c == "lyric_font" and arg is not None:
+                try:
+                    win.lyric_pt = max(16, min(56, int(float(arg))))
+                    win._apply_font(win.font_idx)   # 重建 font_big/_line_h + 清歌词缓存
+                except ValueError:
+                    pass
+            elif c == "lyric_outline" and arg is not None:
+                try:
+                    win.lyric_outline = max(0, min(10, float(arg)))
+                    win._word_cache.clear()         # 歌词描边变了重建逐字 pixmap
+                except ValueError:
+                    pass
+            elif c == "lyric_color" and arg is not None:
+                col = QtGui.QColor(arg.strip())
+                if col.isValid():
+                    win.lyric_color = col
+                    win._word_cache.clear()
+            elif c == "lyric_margin" and arg is not None:
+                try:
+                    win.lyric_margin = max(0, min(320, int(float(arg))))
+                except ValueError:
+                    pass
             # 窗口桌面位置(pc-service 据 state_cache.json 在拉起时下发,恢复上次关闭时的位置)
             elif c == "pos" and arg is not None:
                 try:
