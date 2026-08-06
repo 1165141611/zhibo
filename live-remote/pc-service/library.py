@@ -74,13 +74,25 @@ def pending_rename():
     return [mid for mid, m in _MANIFEST.items() if m.get("needs_name")]
 
 
+_BUMP_DEBOUNCE_S = 10          # 同一首歌短时间内重复入队只计一次(见 bump_play)
+_last_bump = {}                # mid → 上次计次时间
+
+
 def bump_play(mid):
     """点歌一次 → 该曲"点歌次数"(plays)+1,持久化到 library.json 并触发刷新
     (手机端点歌列表默认按 plays 倒序,常点的歌浮到最前)。plays 只存清单、不写 meta.json
-    (meta.json 会被启动迁移按 QRC 重写,存这里会被冲掉;清单才是列表的权威源)。"""
+    (meta.json 会被启动迁移按 QRC 重写,存这里会被冲掉;清单才是列表的权威源)。
+    ★ 同一 mid 在 _BUMP_DEBOUNCE_S 内重复入队**不重复计次**(入队本身照常):防手滑连点、
+    更防自动化测试脚本循环走真实 k_enqueue 灌次数——2026-08-06 破案"少年锦时 315 次":
+    压测脚本反复拿"列表第一首"入队,而列表恰按 plays 倒序,第一次 +1 后该曲便钉死在
+    第一位,后续每轮压测全灌给它(正反馈)。脚本已删,此守卫兜底同类污染。"""
     ent = _MANIFEST.get(mid)
     if not ent:
         return
+    now = time.time()
+    if now - _last_bump.get(mid, 0) < _BUMP_DEBOUNCE_S:
+        return ent.get("plays", 0)
+    _last_bump[mid] = now
     ent["plays"] = int(ent.get("plays", 0)) + 1
     _save_manifest(_MANIFEST)
     if _on_change:
