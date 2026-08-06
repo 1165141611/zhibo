@@ -32,7 +32,11 @@ def _song_dir(mid):
 
 
 def _qrc_decrypt(raw: bytes) -> str:
-    """两种封装:手机 hex 文本 / PC `[offset:0]\\n`+裸密文 → tripledes + zlib → XML。"""
+    """三种封装:QQ音乐 明文 XML(直接返回)/ 手机 hex 文本 / PC `[offset:0]\\n`+裸密文 → tripledes + zlib → XML。
+    镜像 karaoke-player/assets._qrc_decrypt 的明文分支(QQ音乐 导入的 QRC 经 API 已解密,落盘即明文)。"""
+    s = raw.lstrip()
+    if s[:5] == b"<?xml" or b"<QrcInfos" in raw[:200] or b"LyricContent=" in raw[:400]:
+        return raw.decode("utf-8", "replace")
     if all(c in b"0123456789abcdefABCDEF\r\n\t " for c in raw.strip()):
         cipher = bytearray.fromhex(raw.strip().decode("ascii"))
     else:

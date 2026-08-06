@@ -1099,3 +1099,21 @@ live 预览、松手/选色 `save=True` 存盘。`_STYLE_KEYS`(歌单/歌词 8 �
 
 **教训**:歌词渲染是全项目最吃 GIL/最多缓存的地方,加可调项时严格分清"要重建 pixmap 的(字体/描边宽/描边色)"
 和"只改绘制位置的(边距/竖直位置)"——后者绝不清缓存,免无谓重建抢音频回调 GIL(同 setlist 冗余重推那条教训)。
+
+## 二十二、QQ音乐 导入歌手机端歌词不显示修复(2026-08-06)
+
+**症状**:QQ音乐 导入的歌 PC 播放器歌词正常,手机演唱页却一直显示"逐字歌词/音准线待电脑端推送"。
+
+**根因**:项目里有**两份 QRC 解析**——播放器 `karaoke-player/assets._qrc_decrypt` 和 pc-service
+`karaoke_data._qrc_decrypt`(供 `GET /song/{mid}/karaoke` 推手机演唱页)。2026-07-26 接 QQ音乐 源时
+只给播放器那份加了**明文 XML 分支**(QQ 歌词经 API 已解密,落盘即明文 QRC XML),pc-service 这份漏了:
+明文既不是 hex 也没加密,走"裸密文"分支 tripledes+zlib 直接抛异常 → `song_karaoke` 返回 None →
+接口 404 → 手机端只能显示占位文案。
+
+**修复**:`karaoke_data._qrc_decrypt` 镜像 assets 的明文识别(`<?xml` 开头 / 前 200B 含 `<QrcInfos` /
+前 400B 含 `LyricContent=` → 直接 decode 返回)。实测 QQ 明文歌 45 行歌词 / 0 音符(QQ 无音高数据,
+音准线不显属预期),WeSing 加密歌 21 行 / 225 音符不受影响。**pc-service 需重启生效**(`_CACHE` 按 mid
+缓存 + 模块常驻)。
+
+**教训**:同一格式的解析逻辑在播放器和 pc-service 各有一份镜像实现(为了 pc-service 不引 numpy),
+**新增数据源/封装格式时两份都要改**——grep `_qrc_decrypt` 全仓确认。
