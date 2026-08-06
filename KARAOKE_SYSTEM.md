@@ -162,7 +162,7 @@ brief([`LiveRemote/UI_DESIGN.md`](LiveRemote/UI_DESIGN.md),已作历史 brief �
     监听状态/显隐;并移除了旧的 scrcpy 自动投屏。详见 [live-remote/README.md](live-remote/README.md) 第三节
     与 [live-remote/DEV_LOG.md](live-remote/DEV_LOG.md) 第九节。
   - **路线图第③步原生 App 已落地**:安卓 Compose 三页签(演唱/队列/遥控),演唱页 Canvas 卡拉OK
-    逐字字幕+音准线(帧驱动插值),遥控页声卡场景/QQ音乐/窗口开关(Studio One/K歌歌词/音准线显隐),
+    逐字字幕+音准线(帧驱动插值),遥控页声卡场景/QQ音乐/窗口开关(Studio One/悬浮绿幕(原"K歌歌词",2026-08-06 改名)/音准线显隐),
     WS 客户端 + `/library`/`/song/{mid}/karaoke`。端到端真机联调通过。见 [LiveRemote/README.md](LiveRemote/README.md)。
   - **直播打磨(2026-07-14 一批)**:曲库管理页(勾选加歌单/编辑歌名/播放切歌/搜索/斑马纹选中态)、
     KTV 双行错开歌词 + 压扁音准线(均"由白染蓝")、竖屏 3:4 窗、`Q` 字体循环 7 款、`P` 音准线显隐、
