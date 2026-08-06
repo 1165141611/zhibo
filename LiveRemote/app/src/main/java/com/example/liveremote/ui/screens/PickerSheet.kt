@@ -207,6 +207,11 @@ private fun SongRow(s: Song, isAdded: Boolean, onAdd: () -> Unit) {
             Text(s.title, color = C.Text, fontSize = F.rowTitle)
             Text(s.artist, color = C.TextDim, fontSize = F.sub, modifier = Modifier.padding(top = 2.dp))
         }
+        // 点歌次数(列表默认按它倒序;0 次不显示,免得整片"0次"噪音)
+        if (s.plays > 0) {
+            Text("${s.plays}次", color = C.TextDim, fontSize = F.sub,
+                modifier = Modifier.padding(end = 10.dp))
+        }
         Box(
             Modifier.size(40.dp).clip(CircleShape).background(if (isAdded) C.Ok else C.Accent).noRippleClick { onAdd() },
             contentAlignment = Alignment.Center,

@@ -2701,9 +2701,9 @@ def _open_library_browser(selftest=False):
                     r["paint"]()
 
             def _bump_key(mid, delta, label, holder):
-                """曲库管理页 −/+ 调默认调式:夹到 [-6,6],持久化(library.set_key),就地更新标签;
+                """曲库管理页 −/+ 调默认调式:夹到 [-12,12],持久化(library.set_key),就地更新标签;
                 若这首正在唱(_now_mid)则**实时下发**边调边听。改的是"下次点到这首用的默认调"。"""
-                nv = max(-6, min(6, holder["k"] + delta))
+                nv = max(-12, min(12, holder["k"] + delta))
                 if nv == holder["k"]:
                     return
                 holder["k"] = nv

@@ -333,7 +333,7 @@ pc-service 把播放器 IPC 接进 WebSocket + 曲库列表 + 点歌队列,供�
   改按 `plays` 倒序返回;手机 App(`Song.plays` + `RemoteViewModel.refreshLibrary` 按 `plays` 倒序、
   同次数按歌名)默认点歌列表常点的浮最前。**改了手机端,已 `assembleDebug` + adb 装机**。
 - **补**(2026-07-16,每曲默认调式):曲库管理页每行加 **`−  <调>  +`** 控件(`_bump_key`),点即
-  `library.set_key(mid, n)` 存进 `library.json`(夹 [-6,6],0=原调;**不触发全量刷新**,就地更新标签不丢
+  `library.set_key(mid, n)` 存进 `library.json`(夹 [-6,6],2026-08-06 扩到 [-12,12],0=原调;**不触发全量刷新**,就地更新标签不丢
   滚动位置);正在唱这首则实时 `_player_send("key n")` 边调边听。载歌统一走 `_player_load(mid)`=
   `load`(player 会清调到 0)+ 若默认调非 0 补下发 `key n`,**手机点到这首直接是调好的调**。
   **手机端不用改**:App 的 `key` 本就跟随服务端推的 `k_key`(载入后 player 上报 `key=n` → server 推

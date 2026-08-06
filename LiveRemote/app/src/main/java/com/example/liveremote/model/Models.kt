@@ -20,7 +20,7 @@ data class AppState(
     val playing: Boolean = false,
     val posMs: Int = 0,
     val durMs: Int = 0,
-    val key: Int = 0,              // 半音,[-6,6]
+    val key: Int = 0,              // 半音,[-12,12]
     val vocal: Boolean = false,    // true=原唱, false=伴奏
     val kVol: Int = 100,           // 伴奏音量 0-100(手机音量键同步)
     // —— 队列 ——

@@ -94,12 +94,12 @@ def get_key(mid):
 
 
 def set_key(mid, key):
-    """设某曲的默认调式(半音,夹到 [-6,6]),持久化到 library.json。**不触发全量刷新**
+    """设某曲的默认调式(半音,夹到 [-12,12]),持久化到 library.json。**不触发全量刷新**
     (托盘就地更新标签,避免重建列表丢滚动位置)。手机点到这首时由 server 载入时下发应用。"""
     ent = _MANIFEST.get(mid)
     if not ent:
         return None
-    key = max(-6, min(6, int(key)))
+    key = max(-12, min(12, int(key)))
     ent["key"] = key
     _save_manifest(_MANIFEST)
     return key

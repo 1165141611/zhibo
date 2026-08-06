@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -180,8 +181,10 @@ private fun App(vm: RemoteViewModel) {
             }
         }
 
-        // 点歌抽屉
+        // 点歌抽屉。每次打开重拉曲库:点歌次数在服务端随点随涨,只在连接时拉一次的话
+        // 本场点过的歌次数/排序都是旧的,看着就"没按次数倒序"。
         if (pickerOpen) {
+            LaunchedEffect(Unit) { vm.refreshLibrary() }
             PickerSheet(library = library, onAdd = vm::enqueue, onClose = { pickerOpen = false })
         }
 

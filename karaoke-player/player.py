@@ -994,7 +994,7 @@ class KaraokeWindow(QtWidgets.QWidget):
         self.set_vocal(not self.use_vocal)
 
     def _change_key(self, semi):
-        semi = int(np.clip(semi, -6, 6))
+        semi = int(np.clip(semi, -12, 12))
         if semi == self.semitone:
             return
         self.semitone = semi

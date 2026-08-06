@@ -241,6 +241,11 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     // ───────────────────────── K歌指令 ─────────────────────────
     fun enqueue(song: Song) {
         client.send("cmd" to "kqueue_add", "mid" to song.mid)
+        // 服务端收到即把该曲"点歌次数"+1;本地同步 +1 让抽屉里的次数即时更新,
+        // 但**不重排**(重排会让正在浏览的列表行跳动),新顺序等下次打开抽屉重拉时生效。
+        _library.value = _library.value.map {
+            if (it.mid == song.mid) it.copy(plays = it.plays + 1) else it
+        }
         toast("已加入队列")
     }
     fun removeAt(idx: Int) {
@@ -268,7 +273,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         client.send("cmd" to "kplaypause")
     }
     fun keyDelta(delta: Int) {
-        val nk = (_state.value.key + delta).coerceIn(-6, 6)
+        val nk = (_state.value.key + delta).coerceIn(-12, 12)
         keyLockUntil = now() + OPT_LOCK_MS                   // 抑制回推,防闪动
         _state.value = _state.value.copy(key = nk)          // 乐观,立即显示新调
         client.send("cmd" to "kkey", "semi" to nk)

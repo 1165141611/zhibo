@@ -109,7 +109,8 @@ pc-service 把播放器 IPC 接进 WebSocket,并加曲库列表/点歌队列(供
 - **`GET /library`** → `{count, songs:[{mid,title,artist}]}`(曲库列表,供点歌页;曲库变化时 WS 会推状态,手机重拉)。
 - **`GET /song/{mid}/karaoke`** → `{mid, lines:[{start,end,chars:[{text,start,dur}]}], notes:[{start,dur,pitch}], chorus:[[s,e]...]}`
   (某首歌的**逐字歌词**(QRC 解析,绝对 ms)+ **音高线**(`.note`,pitch 归一化 0..1),供**演唱页卡拉OK渲染**;
-  手机在正唱歌切换时拉一次。解析见 `karaoke_data.py`,复用 `tripledes`(不引 numpy),按 mid 缓存。404=无此歌 QRC)。
+  手机在正唱歌切换时拉一次。解析见 `karaoke_data.py`,复用 `tripledes`(不引 numpy),按 mid 缓存;支持 WeSing
+  加密 QRC 与 QQ音乐 **明文 QRC XML**(2026-08-06 补,与播放器 `assets._qrc_decrypt` 保持镜像)。404=无此歌 QRC)。
   **`chorus`** = 副歌区间 `[[起ms,止ms],...]`,读自 `<曲库>/<mid>/meta.json` 的 `chorus` 键(**手动标注**,无则空;
   原供已移除的自动切镜状态机,现暂无消费方,保留字段)。
 - **WebSocket 命令**(App→电脑,`server.py` 转成播放器 IPC / 队列操作):
