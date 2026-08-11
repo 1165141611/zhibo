@@ -104,20 +104,27 @@ class AudioEngine:
                 stretched = writer.data
                 if stretched.shape[1]:
                     rbuf = np.concatenate([rbuf, stretched], axis=1)
-                # 连续重采样(比率 factor)→ 最多产出 B 个样本
+                # 连续重采样(比率 factor)→ 最多产出 B 个样本。
+                # 向量化线性插值(原来是逐样本 Python 循环,4096 样本要跑几千轮解释器,
+                # 是变调时生产者的最大 CPU 头;向量化后余量大增,更抗别的进程挤压)。
                 avail = rbuf.shape[1]
-                out = []
-                while rpos + 1 < avail and len(out) < B:
-                    i = int(rpos)
-                    f = rpos - i
-                    out.append(rbuf[:, i] * (1 - f) + rbuf[:, i + 1] * f)
-                    rpos += factor
+                n = 0
+                if avail - 1 > rpos:
+                    n = min(B, int(np.ceil((avail - 1 - rpos) / factor)))
+                if n:
+                    rp = rpos + factor * np.arange(n)   # 别叫 pos:会覆盖上面的源位置变量
+                    idx = rp.astype(np.int64)
+                    frac = (rp - idx).astype(np.float32)
+                    commit = np.ascontiguousarray(
+                        (rbuf[:, idx] * (1 - frac) + rbuf[:, idx + 1] * frac).T,
+                        np.float32)
+                    rpos += factor * n
+                else:
+                    commit = np.zeros((0, 2), np.float32)
                 drop = int(rpos)
                 if drop:
                     rbuf = rbuf[:, drop:]
                     rpos -= drop
-                commit = (np.asarray(out, np.float32) if out
-                          else np.zeros((0, 2), np.float32))
 
             with self._lock:
                 if gen == self._gen:

@@ -112,9 +112,25 @@ _ui_queue = queue.Queue()
 _ui_ready = threading.Event()
 
 
+def _lower_thread_priority():
+    """把**当前线程**优先级降到 BELOW_NORMAL(-1)。在线程体开头调用。
+    用于 Tk UI 线程(开窗建几百个控件是整核尖峰)和扫描 worker(纯 Python 3DES 解 QRC 烧核):
+    这些突发只配用空闲 CPU,不许挤播放器的音频链(重负载下开窗慢零点几秒,可接受)。
+    注意必须显式声明 restype/argtypes:GetCurrentThread 的伪句柄(-2)按 ctypes 默认的
+    32 位 int 传参在 64 位下是无效句柄,调用会静默失败(实测 ok=0)。"""
+    try:
+        k32 = ctypes.WinDLL("kernel32")           # 独立实例,不动全局 windll 的函数签名
+        k32.GetCurrentThread.restype = ctypes.c_void_p
+        k32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        k32.SetThreadPriority(k32.GetCurrentThread(), -1)   # THREAD_PRIORITY_BELOW_NORMAL
+    except Exception:
+        pass
+
+
 def _ui_thread_main():
     global _ui_root, _ui_thread_id
     import tkinter as tk
+    _lower_thread_priority()   # 开窗尖峰不抢播放器音频(见 DEV_LOG 二十四)
     _ui_root = tk.Tk()
     _ui_root.withdraw()                     # 根本身永不显示,只做所有窗口的宿主
     _ui_thread_id = threading.get_ident()
@@ -1485,7 +1501,10 @@ def start_player():
             [config.PLAYER_PYTHON, config.PLAYER_PATH,
              "--device", str(dev_idx),
              "--hidden", "--paused", "--no-smtc"],
-            creationflags=0x08000000,        # CREATE_NO_WINDOW
+            # CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY_CLASS:播放器整进程高于 pc-service,
+            # 开托盘窗(前台加成 + 建控件 CPU 尖峰)不再挤到它的 Python 音频回调/GIL 持有线程
+            # (优先级反转是"开窗瞬间伴奏咯噔"的根因,见 DEV_LOG 二十四)
+            creationflags=0x08000000 | 0x00008000,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, encoding="utf-8", errors="replace", bufsize=1, env=_env,
         )
@@ -2170,6 +2189,7 @@ def _open_scan_window():
 
         # ---- 扫描 worker(**只扫选中的那一端**;手机侧慢:adb 拉取 + ffmpeg 转换,边转边显示)----
         def _do_scan(gen, serial, mode):
+            _lower_thread_priority()   # 3DES 解 QRC/adb 拉取烧核,别挤播放器音频
             def pcb(msg):
                 if st["gen"] == gen:
                     st["msg"] = msg
