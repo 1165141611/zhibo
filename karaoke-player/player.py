@@ -20,6 +20,7 @@ import sys
 import os
 import json
 import math
+import re
 import time
 import threading
 
@@ -60,6 +61,18 @@ class _NoSmtc:
 class _Ctl(QtCore.QObject):
     """服务模式下的控制桥:后台线程读 stdin 的指令,经信号回到 GUI 线程执行。"""
     cmd = QtCore.Signal(str)
+
+
+def _viewer_title(t: str) -> str:
+    """观众版歌名:剥掉**结尾的** `[...]` 内部标记(如 segment_pitch 分段变调歌的
+    `[副歌-2]`——主播在托盘/手机列表看得到标记,绿幕字幕不给观众展示)。
+    只剥结尾、可叠层;歌名中间的方括号不动,防误伤真带括号的歌名。"""
+    t = (t or "").strip()
+    while True:
+        t2 = re.sub(r"\s*\[[^\[\]]*\]$", "", t).strip()
+        if t2 == t:
+            return t
+        t = t2
 
 
 class KaraokeWindow(QtWidgets.QWidget):
@@ -276,7 +289,7 @@ class KaraokeWindow(QtWidgets.QWidget):
             if not self.setlist_titles:
                 return None
             sep = "　"             # 一个全角空格(原两个,间隔缩小一半)
-            text = sep.join(self.setlist_titles) + sep
+            text = sep.join(_viewer_title(t) for t in self.setlist_titles) + sep
             fm = QtGui.QFontMetrics(self.font_small)
             total = fm.horizontalAdvance(text)
             # 白底 + 可调描边(样式窗:描边宽 setlist_outline、色 setlist_color;默认黑,KTV 字幕款)
@@ -564,7 +577,7 @@ class KaraokeWindow(QtWidgets.QWidget):
         行 = 歌名(大) / 原唱:<歌手>(有才显) / 演唱:<主播名>。返回 {items, total_h}。"""
         if self._title_card is not None:
             return self._title_card
-        title = (self.song.title or "").strip()
+        title = _viewer_title(self.song.title)
         if not title:
             return None
         fam = self.font_big.family()
